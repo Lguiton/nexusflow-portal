@@ -3,13 +3,12 @@
 import React, { useState, useEffect } from 'react';
 import { Cpu, Server, ShieldCheck } from 'lucide-react';
 import SubAgentWidget from '../components/SubAgentWidget';
-
-// 100% matched to your existing project structure:
-import { ClientProvider } from '../components/ClientContext';
-import SwarmLogStreamer from '../src/components/SwarmLogStreamer';
+import SwarmLogStreamer from '../components/SwarmLogStreamer';
+import { ClientProvider } from '../components/ClientContext'; 
 import CognitiveSearchBar from '../components/CognitiveSearchBar';
 import AdvancedAnalyticsDashboard from '../components/AdvancedAnalyticsDashboard';
 import VirtualCFOWidget from '../components/VirtualCFOWidget';
+import DataEngineerWidget from '../components/DataEngineerWidget';
 import FileDropzone from '../components/FileDropzone';
 import { SwarmVisualizer } from '../components/SwarmVisualizer';
 
@@ -24,11 +23,13 @@ export default function CoreDashboard() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchResult, setSearchResult] = useState<any>(null);
+  const [dashboardRefreshTrigger, setDashboardRefreshTrigger] = useState<number>(0);
 
   useEffect(() => {
     async function fetchHealth() {
       try {
-        const res = await fetch('http://127.0.0.1:8000/api/v1/health');
+        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+        const res = await fetch(`${backendUrl}/api/v1/health`);
         if (res.ok) {
           const data: HealthData = await res.json();
           setHealth(data);
@@ -69,72 +70,49 @@ export default function CoreDashboard() {
         <main className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                System State
-              </span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">System State</span>
               <Server className="w-5 h-5 text-indigo-400" />
             </div>
             <div className="mt-4">
-              <p className="text-2xl font-bold text-white">
-                {loading ? "Checking..." : health?.status || "OFFLINE"}
-              </p>
-              <p className="text-xs text-slate-500 mt-1">
-                FastAPI Engine v{health?.version || "1.0.0"}
-              </p>
+              <p className="text-2xl font-bold text-white">{loading ? "Checking..." : health?.status || "OFFLINE"}</p>
+              <p className="text-xs text-slate-500 mt-1">FastAPI Engine v{health?.version || "1.0.0"}</p>
             </div>
           </div>
 
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Runtime Security
-              </span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Runtime Security</span>
               <ShieldCheck className="w-5 h-5 text-emerald-400" />
             </div>
             <div className="mt-4">
-              <p className="text-2xl font-bold text-white">
-                {health?.docker_boundary_secure ? "ISOLATED" : "CHECKING"}
-              </p>
-              <p className="text-xs text-slate-500 mt-1">
-                RevSecOps & SysAdmin Policy Enforced
-              </p>
+              <p className="text-2xl font-bold text-white">{health?.docker_boundary_secure ? "ISOLATED" : "CHECKING"}</p>
+              <p className="text-xs text-slate-500 mt-1">RevSecOps & SysAdmin Policy Enforced</p>
             </div>
           </div>
 
-          {/* Sub-Agent Network widget */}
           <SubAgentWidget activeCount={health?.active_sub_agents} />
         </main>
 
-        {/* Universal Cognitive Search Bar */}
-        <section>
-          <CognitiveSearchBar onQueryResult={(data: any) => setSearchResult(data)} />
-        </section>
+        <section><CognitiveSearchBar onQueryResult={(data: any) => setSearchResult(data)} /></section>
+        <section><SwarmLogStreamer sessionId="active_dashboard_session" /></section>
 
-        {/* Swarm Telemetry Terminal (Inserted directly below search) */}
-        <section>
-          <SwarmLogStreamer sessionId="active_dashboard_session" />
-        </section>
-
-        {/* Swarm Visualizer pops up here ONLY when a search returns data */}
         {searchResult && (
           <section className="animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out">
             <SwarmVisualizer data={searchResult} />
           </section>
         )}
 
-        {/* Advanced Statistical & BI Analytics Suite */}
-        <section>
-          <AdvancedAnalyticsDashboard />
-        </section>
+        <section><AdvancedAnalyticsDashboard /></section>
 
-        {/* Financial Intelligence Section (Comptroller removed) */}
-        <section className="grid grid-cols-1 gap-6">
-          <VirtualCFOWidget />
+        {/* Financial & Data Engineering Intelligence Grid */}
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <VirtualCFOWidget refreshTrigger={dashboardRefreshTrigger} />
+          <DataEngineerWidget refreshTrigger={dashboardRefreshTrigger} />
         </section>
 
         {/* Automated Data Ingestion Section */}
         <section>
-          <FileDropzone />
+          <FileDropzone onUploadSuccess={() => setDashboardRefreshTrigger(prev => prev + 1)} />
         </section>
 
       </div>

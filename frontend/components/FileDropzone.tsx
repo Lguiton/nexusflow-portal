@@ -2,24 +2,25 @@
 
 import React, { useState, useRef } from 'react';
 import { UploadCloud, CheckCircle, AlertCircle, Loader2, Database } from 'lucide-react';
-import { useClient } from "./ClientContext"; 
+import { useClientId } from "./ClientContext"; 
 
+const MAX_FILE_SIZE = 50 * 1024 * 1024; 
 
-// Inside your component:
-const client = useContext(ClientContext);
-// Note: If your context file uses `useClientId` instead of `useClient`, update the import and the variable call below to match.
+interface FileDropzoneProps {
+  onUploadSuccess?: () => void;
+}
 
-export default function FileDropzone() {
+export default function FileDropzone({ onUploadSuccess }: FileDropzoneProps) {
   const [dragActive, setDragActive] = useState(false);
   const [status, setStatus] = useState<'IDLE' | 'UPLOADING' | 'SUCCESS' | 'ERROR'>('IDLE');
   const [message, setMessage] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   
-  let clientId = "default_client";
+  let currentClientId = "default_client";
   try {
-    const clientCtx = useClient() as any;
+    const clientCtx = useClientId() as any;
     if (clientCtx && clientCtx.clientId) {
-      clientId = clientCtx.clientId;
+      currentClientId = clientCtx.clientId;
     }
   } catch (e) { }
 
@@ -34,43 +35,56 @@ export default function FileDropzone() {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      await uploadFile(e.dataTransfer.files[0]);
-    }
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) await uploadFile(e.dataTransfer.files[0]);
   };
 
   const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     e.preventDefault();
-    if (e.target.files && e.target.files[0]) {
-      await uploadFile(e.target.files[0]);
-    }
+    if (e.target.files && e.target.files[0]) await uploadFile(e.target.files[0]);
   };
 
   const uploadFile = async (file: File) => {
-    if (file.type !== "text/csv" && !file.name.endsWith('.csv')) {
-      setStatus('ERROR');
-      setMessage('Only CSV files are supported.');
-      return;
+    if (file.type !== "text/csv" && !file.name.toLowerCase().endsWith('.csv')) {
+      setStatus('ERROR'); setMessage('Security Policy: Only valid CSV files are permitted.'); return;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      setStatus('ERROR'); setMessage('Security Block: Payload exceeds the 50MB threshold.'); return;
     }
 
     setStatus('UPLOADING');
+    const safeFileName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    const safeFile = new File([file], safeFileName, { type: file.type });
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', safeFile);
 
     try {
-      const res = await fetch('/api/finance/upload-ledger', {
+      const token = typeof window !== 'undefined' ? sessionStorage.getItem('nexus_access_token') : null;
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+
+      const res = await fetch(`${backendUrl}/api/finance/upload-ledger`, {
         method: 'POST',
-        headers: { 'x-client-id': clientId },
+        headers: { 
+          'x-client-id': currentClientId,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
         body: formData
       });
       
-      if (!res.ok) throw new Error('Ingestion pipeline rejected the payload.');
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || 'Ingestion pipeline rejected the payload.');
+      }
       
       setStatus('SUCCESS');
-      setMessage(`Successfully validated and ingested ${file.name} into DuckDB.`);
+      setMessage(`Successfully validated and ingested ${safeFileName} into DuckDB.`);
+      
+      // BUG B FIXED: Tell the parent page that new data exists!
+      if (onUploadSuccess) {
+        onUploadSuccess();
+      }
     } catch (err: any) {
       setStatus('ERROR');
-      setMessage(err.message || 'An error occurred during upload.');
+      setMessage(err.message || 'An error occurred during secure upload.');
     }
   };
 
@@ -96,7 +110,6 @@ export default function FileDropzone() {
           <>
             <UploadCloud className="w-10 h-10 text-slate-400 mb-3" />
             <p className="text-slate-200 text-sm font-medium">Drag & drop your CSV ledger here, or click to browse</p>
-            <p className="text-slate-500 text-xs mt-1">Supports strict CSV file uploads for multi-tenant analytics routing</p>
           </>
         )}
         {status === 'UPLOADING' && (

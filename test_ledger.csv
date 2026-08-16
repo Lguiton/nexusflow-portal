@@ -1,0 +1,4 @@
+date,description,amount,category
+2026-08-01,Stripe Payout,5400.00,Revenue
+2026-08-02,AWS Cloud Hosting,-320.50,Infrastructure
+2026-08-05,Software Subscriptions,-45.00,SaaS

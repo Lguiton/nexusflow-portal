@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"name": "nexusflow-portal",
+			"path": "."
+		}
+	],
+	"settings": {
+		"python.defaultInterpreterPath": "${workspaceFolder}/backend/venv/Scripts/python.exe"
+	}
+}
