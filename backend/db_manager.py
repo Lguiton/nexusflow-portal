@@ -53,9 +53,9 @@ def _validate_csv_structure(csv_file_path: str) -> None:
                 )
 
 
-def get_connection():
+def get_connection(read_only: bool = False):
     os.makedirs("db", exist_ok=True)
-    return duckdb.connect(DB_PATH)
+    return duckdb.connect(DB_PATH, read_only=read_only)
 
 
 def _normalize_header(col: str) -> str:
@@ -114,10 +114,14 @@ def ingest_csv_to_db(csv_file_path: str, client_id: str, table_name: str = "ledg
 
     _validate_csv_structure(csv_file_path)
 
-    con = get_connection()
+    con = get_connection(read_only=False)
     try:
+        # Atomic Transaction Isolation
+        con.execute("BEGIN TRANSACTION;")
+
         df = pd.read_csv(csv_file_path)
         if df.empty:
+            con.execute("COMMIT;")
             return "No rows found in the uploaded file -- nothing was ingested."
 
         df = normalize_columns(df)
@@ -130,6 +134,7 @@ def ingest_csv_to_db(csv_file_path: str, client_id: str, table_name: str = "ledg
 
         if not table_exists:
             con.execute(f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM df')
+            con.execute("COMMIT;")
             return f"Created '{table_name}' fresh with {len(df)} rows and {len(df.columns)} columns."
 
         existing_cols = [
@@ -150,19 +155,21 @@ def ingest_csv_to_db(csv_file_path: str, client_id: str, table_name: str = "ledg
             con.execute(f'DELETE FROM "{table_name}" WHERE client_id = ?', [str(client_id)])
 
         # DuckDB's BY NAME insert matches source and destination columns by
-        # name and fills anything missing on either side with NULL. This is
-        # the actual fix for the column-shift bug -- a plain positional
-        # INSERT INTO ... SELECT * would reproduce it every time.
+        # name and fills anything missing on either side with NULL.
         con.execute(f'INSERT INTO "{table_name}" BY NAME SELECT * FROM df')
 
+        con.execute("COMMIT;")
         verb = "Replaced" if mode == "replace" else "Appended"
         return f"{verb} {len(df)} rows in '{table_name}' for client '{client_id}' ({len(new_cols)} new column(s) added)."
+    except Exception as e:
+        con.execute("ROLLBACK;")
+        raise RuntimeError(f"Database transaction rollback triggered: {str(e)}")
     finally:
         con.close()
 
 
 def query_db(sql_query: str, params: list = None):
-    con = get_connection()
+    con = get_connection(read_only=True)
     try:
         return con.execute(sql_query, params or []).df()
     finally:
@@ -170,9 +177,6 @@ def query_db(sql_query: str, params: list = None):
 
 
 # Columns the LLM is allowed to reference when building a query intent.
-# client_id is deliberately excluded -- it is never something the model
-# can set or filter on. It is always injected server-side from the
-# authenticated request, never from user text.
 QUERYABLE_COLUMNS = {"id", "client_name", "mrr", "category"}
 ALLOWED_OPERATORS = {"=", "!=", ">", "<", ">=", "<="}
 ALLOWED_AGGREGATES = {"sum", "count", "avg", "min", "max"}
@@ -180,25 +184,7 @@ ALLOWED_AGGREGATES = {"sum", "count", "avg", "min", "max"}
 
 def build_safe_query(intent: dict, client_id: str):
     """
-    Turns a structured intent (produced by an LLM in JSON mode, never raw
-    SQL text) into a parameterized query. client_id is always forced into
-    the WHERE clause here, server-side -- the model has no path to control
-    or omit it, so one tenant's query can never return another tenant's
-    rows, regardless of what the model outputs.
-
-    intent shape:
-      {
-        "operation": "list" | "aggregate",
-        "aggregate_function": "sum"|"count"|"avg"|"min"|"max"|null,
-        "aggregate_column": "<one of QUERYABLE_COLUMNS>"|null,
-        "filters": [{"column": str, "op": str, "value": any}, ...],
-        "order_by": "<one of QUERYABLE_COLUMNS>"|null,
-        "order_dir": "ASC"|"DESC",
-        "limit": int|null,
-      }
-    Unrecognized columns/operators are silently dropped rather than
-    erroring, so a slightly malformed model response degrades to a safer,
-    simpler query instead of failing or executing something unintended.
+    Turns a structured intent into a parameterized query with server-side tenant isolation.
     """
     if not client_id or not str(client_id).strip():
         raise ValueError("client_id is required for querying.")

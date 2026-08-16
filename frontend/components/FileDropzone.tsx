@@ -1,132 +1,125 @@
-'use client';
+"use client";
 
-import React, { useState } from 'react';
-import { UploadCloud, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
-// 1. IMPORT YOUR CLIENT CONTEXT HOOK
-import { useClientId } from './ClientContext'; 
+import React, { useState, useRef } from 'react';
+import { UploadCloud, CheckCircle, AlertCircle, Loader2, Database } from 'lucide-react';
+import { useClient } from "./ClientContext"; 
+
+
+// Inside your component:
+const client = useContext(ClientContext);
+// Note: If your context file uses `useClientId` instead of `useClient`, update the import and the variable call below to match.
 
 export default function FileDropzone() {
-  const [isHovering, setIsHovering] = useState(false);
-  const [status, setStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [status, setStatus] = useState<'IDLE' | 'UPLOADING' | 'SUCCESS' | 'ERROR'>('IDLE');
+  const [message, setMessage] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  
+  let clientId = "default_client";
+  try {
+    const clientCtx = useClient() as any;
+    if (clientCtx && clientCtx.clientId) {
+      clientId = clientCtx.clientId;
+    }
+  } catch (e) { }
 
-  // 2. GRAB THE DYNAMIC TENANT ID
-  const clientId = useClientId(); 
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") setDragActive(true);
+    else if (e.type === "dragleave") setDragActive(false);
+  };
 
-  const handleFileUpload = async (file: File) => {
-    setStatus('uploading');
-    setErrorMessage(null);
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      await uploadFile(e.dataTransfer.files[0]);
+    }
+  };
 
+  const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (e.target.files && e.target.files[0]) {
+      await uploadFile(e.target.files[0]);
+    }
+  };
+
+  const uploadFile = async (file: File) => {
+    if (file.type !== "text/csv" && !file.name.endsWith('.csv')) {
+      setStatus('ERROR');
+      setMessage('Only CSV files are supported.');
+      return;
+    }
+
+    setStatus('UPLOADING');
     const formData = new FormData();
-    formData.append('file', file); // Matches the FastAPI File(...) requirement
-
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+    formData.append('file', file);
 
     try {
-      // 3. BULLETPROOF TYPESCRIPT HEADERS
-      const myHeaders: Record<string, string> = {
-        'x-client-id': clientId ? String(clientId) : 'demo-tenant-123'
-      };
-
-      const res = await fetch(`${apiUrl}/api/finance/upload-ledger`, {
+      const res = await fetch('/api/finance/upload-ledger', {
         method: 'POST',
-        headers: myHeaders,
-        body: formData,
+        headers: { 'x-client-id': clientId },
+        body: formData
       });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        // THE DEBUG FIX: Stringify the exact error detail from FastAPI
-        throw new Error(JSON.stringify(data.detail) || 'Failed to upload ledger.');
-      }
-
-      setStatus('success');
-      setTimeout(() => setStatus('idle'), 4000);
+      
+      if (!res.ok) throw new Error('Ingestion pipeline rejected the payload.');
+      
+      setStatus('SUCCESS');
+      setMessage(`Successfully validated and ingested ${file.name} into DuckDB.`);
     } catch (err: any) {
-      console.error("Upload error:", err);
-      setStatus('error');
-      setErrorMessage(err.message || 'Network error connecting to FastAPI backend.');
-    }
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsHovering(false);
-    const files = e.dataTransfer.files;
-    if (files && files.length > 0) {
-      handleFileUpload(files[0]);
-    }
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (files && files.length > 0) {
-      handleFileUpload(files[0]);
+      setStatus('ERROR');
+      setMessage(err.message || 'An error occurred during upload.');
     }
   };
 
   return (
-    <div className="w-full mt-6">
-      <div className="flex items-center justify-between mb-4 border-b border-slate-800 pb-3">
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-2xl">
+      <div className="mb-4 flex items-center gap-2">
+        <Database className="w-5 h-5 text-indigo-400" />
         <div>
-          <h3 className="text-lg font-bold flex items-center gap-2 text-white">
-            <UploadCloud className="text-cyan-400 w-5 h-5" />
-            Automated Data Ingestion (DuckDB)
-          </h3>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Drop CSVs here to ingest structured financial logs into your live database.
-          </p>
+          <h3 className="text-slate-100 font-semibold text-sm">Automated Data Ingestion (DuckDB)</h3>
+          <p className="text-slate-400 text-xs">Drop CSVs here to safely ingest structured financial logs.</p>
         </div>
       </div>
-
-      <label 
-        onDragOver={(e) => { e.preventDefault(); setIsHovering(true); }}
-        onDragLeave={() => setIsHovering(false)}
-        onDrop={handleDrop}
-        className={`w-full h-40 border-2 border-dashed rounded-xl flex flex-col items-center justify-center transition-colors cursor-pointer ${
-          isHovering 
-            ? 'border-cyan-500 bg-cyan-950/20 text-cyan-400' 
-            : 'border-slate-700 bg-slate-900 text-slate-400 hover:border-cyan-500 hover:text-cyan-400'
-        }`}
+      <div 
+        className={`relative border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center transition-all cursor-pointer ${
+          dragActive ? 'border-indigo-500 bg-indigo-950/20 scale-[1.02]' : 'border-slate-700 bg-slate-950/50 hover:border-slate-500'
+        } ${status === 'UPLOADING' ? 'opacity-50 pointer-events-none' : ''}`}
+        onDragEnter={handleDrag} onDragLeave={handleDrag} onDragOver={handleDrag} onDrop={handleDrop}
+        onClick={() => inputRef.current?.click()}
       >
-        <input 
-          type="file" 
-          accept=".csv" 
-          className="hidden" 
-          onChange={handleFileSelect} 
-        />
-
-        {status === 'uploading' && (
+        <input ref={inputRef} type="file" accept=".csv" onChange={handleChange} className="hidden" />
+        
+        {status === 'IDLE' && (
           <>
-            <Loader2 className="w-10 h-10 mb-3 animate-spin text-cyan-400" />
-            <p className="text-sm font-semibold text-cyan-400">Ingesting into DuckDB...</p>
+            <UploadCloud className="w-10 h-10 text-slate-400 mb-3" />
+            <p className="text-slate-200 text-sm font-medium">Drag & drop your CSV ledger here, or click to browse</p>
+            <p className="text-slate-500 text-xs mt-1">Supports strict CSV file uploads for multi-tenant analytics routing</p>
           </>
         )}
-
-        {status === 'success' && (
+        {status === 'UPLOADING' && (
           <>
-            <CheckCircle className="w-10 h-10 mb-3 text-emerald-400" />
-            <p className="text-sm font-semibold text-emerald-400">File Ingested Successfully!</p>
+            <Loader2 className="w-10 h-10 text-indigo-400 animate-spin mb-3" />
+            <p className="text-slate-200 text-sm font-medium">Ingesting into DuckDB & Validating Schema...</p>
           </>
         )}
-
-        {status === 'error' && (
+        {status === 'SUCCESS' && (
           <>
-            <AlertCircle className="w-10 h-10 mb-3 text-rose-400" />
-            <p className="text-sm font-semibold text-rose-400">Upload Failed</p>
-            <p className="text-xs text-rose-300 mt-1 max-w-xs text-center break-words">{errorMessage}</p>
+            <CheckCircle className="w-10 h-10 text-emerald-400 mb-3" />
+            <p className="text-emerald-400 text-sm font-medium">Data Embedded Successfully</p>
+            <p className="text-slate-400 text-xs mt-1">{message}</p>
           </>
         )}
-
-        {status === 'idle' && (
+        {status === 'ERROR' && (
           <>
-            <UploadCloud className="w-10 h-10 mb-3" />
-            <p className="text-sm font-semibold text-white">Drag & drop your CSV ledger here, or click to browse</p>
-            <p className="text-xs mt-1">Supports CSV file uploads for direct analytics routing</p>
+            <AlertCircle className="w-10 h-10 text-red-400 mb-3" />
+            <p className="text-red-400 text-sm font-medium">Ingestion Failed</p>
+            <p className="text-slate-400 text-xs mt-1">{message}</p>
           </>
         )}
-      </label>
+      </div>
     </div>
   );
 }

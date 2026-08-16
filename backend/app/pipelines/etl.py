@@ -1,29 +1,25 @@
+import logging
 import pandas as pd
-import io
+from pathlib import Path
+from backend.db_manager import ingest_csv_to_db
 
-class DataEngineeringPipeline:
-    """Automated ETL pipeline component for NexusFlow Analytics."""
-    
-    def extract_and_transform(self, file_bytes: bytes) -> dict:
-        try:
-            # Read raw binary data into dataframe
-            df = pd.read_csv(io.BytesIO(file_bytes))
-            
-            # Clean formats: strip whitespace from columns and drop nulls
-            df.columns = [c.strip().lower() for c in df.columns]
-            df_cleaned = df.dropna()
-            
-            return {
-                "status": "Success: 200 OK",
-                "rows_extracted": len(df),
-                "rows_cleaned": len(df_cleaned),
-                "database_ready": True
-            }
-        except Exception as e:
-            return {
-                "status": "Error: 400 Bad Request",
-                "message": str(e),
-                "database_ready": False
-            }
+logger = logging.getLogger("nexusflow.pipeline.etl")
 
-etl_pipeline = DataEngineeringPipeline()
+class EnterpriseETLPipeline:
+    """
+    Core ETL Pipeline module supporting Agent #03 (Data Engineer).
+    Handles batch ingestion, tenant scoping, and columnar database storage.
+    """
+    def process_and_load_ledger(self, file_path: str, client_id: str) -> str:
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"ETL source path not found: {file_path}")
+
+        if not client_id or not client_id.strip():
+            raise ValueError("ETL Security Error: Missing client_id for multi-tenant isolation.")
+
+        logger.info("Executing ETL pipeline for tenant %s from source %s", client_id, file_path)
+        
+        # Delegates secure ingestion to DuckDB manager
+        result_status = ingest_csv_to_db(str(path), client_id=client_id, table_name="ledgers")
+        return result_status

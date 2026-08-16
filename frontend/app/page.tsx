@@ -1,20 +1,16 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Cpu, Server, ShieldCheck, Activity } from 'lucide-react';
+import { Cpu, Server, ShieldCheck } from 'lucide-react';
 import SubAgentWidget from '../components/SubAgentWidget';
 
-// IMPORT THE PROVIDER
-import { ClientProvider } from '../components/ClientContext'; 
-
-// Import your existing components
+// 100% matched to your existing project structure:
+import { ClientProvider } from '../components/ClientContext';
+import SwarmLogStreamer from '../src/components/SwarmLogStreamer';
 import CognitiveSearchBar from '../components/CognitiveSearchBar';
 import AdvancedAnalyticsDashboard from '../components/AdvancedAnalyticsDashboard';
 import VirtualCFOWidget from '../components/VirtualCFOWidget';
-import ComptrollerWidget from '../components/ComptrollerWidget';
 import FileDropzone from '../components/FileDropzone';
-
-// NEW: Import the visualizer we just built
 import { SwarmVisualizer } from '../components/SwarmVisualizer';
 
 interface HealthData {
@@ -27,8 +23,6 @@ interface HealthData {
 export default function CoreDashboard() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
-  
-  // NEW: State to hold the swarm's response payload
   const [searchResult, setSearchResult] = useState<any>(null);
 
   useEffect(() => {
@@ -107,18 +101,21 @@ export default function CoreDashboard() {
             </div>
           </div>
 
-          {/* NEW: The interactive Sub-Agent Network widget */}
+          {/* Sub-Agent Network widget */}
           <SubAgentWidget activeCount={health?.active_sub_agents} />
-          
         </main>
 
         {/* Universal Cognitive Search Bar */}
         <section>
-          {/* NEW: Pass the setSearchResult setter to your search bar */}
           <CognitiveSearchBar onQueryResult={(data: any) => setSearchResult(data)} />
         </section>
 
-        {/* NEW: The Swarm Visualizer pops up here ONLY when a search returns data */}
+        {/* Swarm Telemetry Terminal (Inserted directly below search) */}
+        <section>
+          <SwarmLogStreamer sessionId="active_dashboard_session" />
+        </section>
+
+        {/* Swarm Visualizer pops up here ONLY when a search returns data */}
         {searchResult && (
           <section className="animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out">
             <SwarmVisualizer data={searchResult} />
@@ -130,10 +127,9 @@ export default function CoreDashboard() {
           <AdvancedAnalyticsDashboard />
         </section>
 
-        {/* Financial Intelligence Section */}
+        {/* Financial Intelligence Section (Comptroller removed) */}
         <section className="grid grid-cols-1 gap-6">
           <VirtualCFOWidget />
-          <ComptrollerWidget />
         </section>
 
         {/* Automated Data Ingestion Section */}

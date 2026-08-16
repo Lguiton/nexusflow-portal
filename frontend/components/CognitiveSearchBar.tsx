@@ -1,8 +1,7 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Search, Sparkles, Terminal, CheckCircle2, ArrowRight, Loader2, AlertCircle } from 'lucide-react';
-// IMPORT CLAUDE'S CONTEXT HOOK
 import { useClientId } from './ClientContext'; 
 
 interface AgentArtifact {
@@ -20,54 +19,91 @@ interface SearchResponse {
   status: string;
 }
 
-// NEW: Define the prop so TypeScript knows it exists
 interface CognitiveSearchBarProps {
   onQueryResult?: (data: any) => void;
 }
 
-// NEW: Accept the prop here
+// Security guard: Maximum query length to prevent payload flooding/abuse
+const MAX_QUERY_LENGTH = 1000;
+// Request timeout in milliseconds (30 seconds)
+const REQUEST_TIMEOUT_MS = 30000;
+
 export default function CognitiveSearchBar({ onQueryResult }: CognitiveSearchBarProps) {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null);
   
-  // CONSUME THE GLOBAL CLIENT ID FROM CLAUDE'S CONTEXT
-  const { clientId } = useClientId();
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const contextValue = useClientId();
+  const activeClientId = typeof contextValue === 'object' && contextValue !== null 
+    ? (contextValue as any).clientId || 'CLI-001' 
+    : String(contextValue || 'CLI-001');
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!query.trim()) return;
+    const trimmedQuery = query.trim();
+
+    if (!trimmedQuery) return;
+
+    // Hardening: Enforce max query length
+    if (trimmedQuery.length > MAX_QUERY_LENGTH) {
+      setError(`Query exceeds maximum allowed length of ${MAX_QUERY_LENGTH} characters.`);
+      return;
+    }
+
+    // Cancel any ongoing search request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     setLoading(true);
     setError(null);
     setResult(null); 
 
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
+    // Set up timeout timer
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS);
+
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/search', {
+      const res = await fetch(`${apiUrl}/api/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // PASS CLIENT ID IN THE BODY AS CLAUDE REQUESTED
-        body: JSON.stringify({ query: query, client_id: clientId }),
+        body: JSON.stringify({ query: trimmedQuery, client_id: activeClientId }),
+        signal: controller.signal,
       });
 
-      if (!res.ok) {
-        throw new Error(`Server returned status ${res.status}`);
-      }
+      clearTimeout(timeoutId);
 
       const data = await res.json();
+
+      if (!res.ok || data.status === 'ERROR') {
+        throw new Error(data.synthesized_insight || data.detail || `Server returned status ${res.status}`);
+      }
+
       setResult(data);
       
-      // NEW: Pass the data up to page.tsx to trigger the Visualizer
       if (onQueryResult) {
         onQueryResult(data);
       }
       
     } catch (err: any) {
-      console.error("Cognitive Search error:", err);
-      setError("Failed to reach FastAPI backend. Ensure uvicorn is running on port 8000.");
+      if (err.name === 'AbortError') {
+        setError('The search request timed out or was cancelled. Please try again.');
+      } else {
+        console.error("Cognitive Search error:", err);
+        setError(err.message || "Failed to reach FastAPI backend.");
+      }
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -86,18 +122,19 @@ export default function CognitiveSearchBar({ onQueryResult }: CognitiveSearchBar
       </div>
 
       <form onSubmit={handleSearch} className="relative flex items-center">
-        <Search className="absolute left-4 w-5 h-5 text-slate-500" />
+        <Search className="absolute left-4 w-5 h-5 text-slate-500 pointer-events-none" />
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Ask anything (e.g., 'What is our highest paying client?')..."
+          maxLength={MAX_QUERY_LENGTH}
+          placeholder="Ask anything (e.g., 'What was our total mrr for the year 2022?')..."
           className="w-full bg-slate-950 border border-slate-800 rounded-xl py-3 pl-12 pr-32 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors"
         />
         <button
           type="submit"
-          disabled={loading}
-          className="absolute right-2 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 rounded-lg text-xs font-semibold text-white transition-colors flex items-center gap-1.5 cursor-pointer"
+          disabled={loading || !query.trim()}
+          className="absolute right-2 z-10 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 rounded-lg text-xs font-semibold text-white transition-colors flex items-center gap-1.5 cursor-pointer shadow-md"
         >
           {loading ? (
             <>
