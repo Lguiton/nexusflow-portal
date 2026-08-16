@@ -3,3 +3,6 @@ node_modules/
 backend/venv/
 __pycache__/
 .env
+.env
+backend/.env
+backend/venv/
