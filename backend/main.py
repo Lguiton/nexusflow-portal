@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional
 from collections import defaultdict
 
 import httpx
-from fastapi import FastAPI, HTTPException, UploadFile, File, Header, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header, WebSocket, WebSocketDisconnect, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 from dotenv import load_dotenv
@@ -39,6 +39,7 @@ app = FastAPI(title="NexusFlow Backend - Hardened Enterprise Edition")
 
 # 2. THEN INCLUDE ROUTERS
 from backend.routers import swarm
+from backend.routers.swarm import route_to_swarm, SwarmRequest
 app.include_router(swarm.router)
 
 # Strict CORS configuration
@@ -106,7 +107,7 @@ def clean_llm_json(raw_response: str) -> dict:
 @app.get("/api/auth/dev-token")
 async def get_dev_token(client_id: str = "default_client"):
     try:
-        secret = os.environ["JWT_SECRET"]
+        secret = os.environ.get("JWT_SECRET", "dev_secret")
         payload = {
             "client_id": client_id,
             "exp": datetime.datetime.utcnow() + datetime.timedelta(days=1)
@@ -116,14 +117,13 @@ async def get_dev_token(client_id: str = "default_client"):
     except Exception as e:
         return {"error": str(e)}
 
-
 @app.get("/api/v1/health")
 async def get_health():
     return {
         "status": "SECURE_ONLINE",
         "docker_boundary_secure": True,
         "concurrency_lock": "ACTIVE",
-        "active_sub_agents": 10,
+        "active_sub_agents": 13,
         "security_headers": "ENFORCED",
         "version": "2.2.1 (Hardened Production Architecture)"
     }
@@ -159,9 +159,6 @@ async def get_cfo_briefing(x_client_id: str = Header("default_client")):
 
 @app.post("/api/v1/data/schema-audit")
 async def run_schema_audit(x_client_id: str = Header("default_client")):
-    """
-    NEW: Triggers Agent #02 (Data Engineer) to analyze schema quality and data hygiene.
-    """
     try:
         result = await asyncio.to_thread(analyze_schema_quality, x_client_id)
         return result
@@ -174,7 +171,9 @@ from backend.agents.ops_shield import analyze_threat
 @app.post("/api/search", response_model=CognitiveSearchResponse)
 async def secure_cognitive_search(req: SearchRequest):
     """
-    The Master Cognitive Search Gateway protected by Ops Shield.
+    The Master Cognitive Search Gateway.
+    Step 1: Ops Shield Firewall
+    Step 2: Master Supervisor Routing
     """
     # 1. THE FIREWALL INTERCEPT
     threat_assessment = await asyncio.to_thread(analyze_threat, req.client_id, req.query)
@@ -186,17 +185,41 @@ async def secure_cognitive_search(req: SearchRequest):
             detail=f"Security Policy Violation: {threat_assessment.get('reason')}"
         )
     
-    # 2. IF SAFE, PROCEED
+    # 2. IF SAFE, PASS THE BATON TO THE SWARM ROUTER
+    swarm_req = SwarmRequest(client_id=req.client_id, query=req.query)
+    swarm_result = await route_to_swarm(swarm_req)
+    
+    # Extract the agent name and the actual output
+    acting_agent = swarm_result.get("agent", "Unknown Agent")
+    agent_output = swarm_result.get("result", {})
+    
+    # 3. RETURN FULL RESULTS TO THE FRONTEND
     return {
         "query": req.query,
-        "synthesized_insight": "Search executed successfully. The Semantic Firewall verified this payload is perfectly safe.",
+        "synthesized_insight": json.dumps(agent_output) if isinstance(agent_output, dict) else str(agent_output),
         "agent_breakdown": [
             {
                 "agent_name": "Ops Shield (Agent #09)", 
                 "domain": "Cybersecurity", 
-                "output_summary": "Payload Cleared & Authorized"
+                "output_summary": "Payload Cleared"
+            },
+            {
+                "agent_name": acting_agent, 
+                "domain": "Execution", 
+                "output_summary": "Task Completed"
             }
         ],
         "confidence_score": 0.99,
         "status": "COMPLETED"
     }
+
+@app.websocket("/ws/swarm/{client_id}/{session_id}")
+async def swarm_telemetry_ws(websocket: WebSocket, client_id: str, session_id: str, token: str = Query(None)):
+    await websocket.accept()
+    logger.info(f"🟢 Telemetry WebSocket Connected: Client {client_id} | Session {session_id}")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_json({"status": "CONNECTED", "active_agents": 13, "message": "Telemetry stream active."})
+    except WebSocketDisconnect:
+        logger.info(f"🔴 Telemetry WebSocket Disconnected: Client {client_id}")

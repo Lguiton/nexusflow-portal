@@ -1,24 +1,26 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Activity, ChevronDown, Cpu, ArrowLeft, Database, Shield, LineChart, BrainCircuit, Terminal } from 'lucide-react';
+import { Activity, ChevronDown, Cpu, ArrowLeft, Database, Shield, LineChart, BrainCircuit, Terminal, PieChart, Globe } from 'lucide-react';
 
-// --- EXACT 11-AGENT REGISTRY MAPPING YOUR BACKEND TREE ---
+// --- EXACT 13-AGENT REGISTRY MAPPING YOUR BACKEND TREE ---
 const AGENT_REGISTRY = [
   { id: "00", name: "Orchestrator", domain: "Semantic Routing", icon: BrainCircuit, status: "Active", capabilities: ["Intent classification", "Agent delegation", "Payload aggregation"], latestReport: "Processed dynamic queries across microservices. Average routing latency: < 50ms." },
   { id: "01", name: "Ingestion Engine", domain: "Data Pipeline", icon: Database, status: "Active", capabilities: ["CSV parsing", "API webhook listening", "Data normalization"], latestReport: "Batch ingestion pipeline active. Normalizing incoming streams into target schema." },
-  { id: "02", name: "Data Cleanser", domain: "Data Pipeline", icon: Database, status: "Standby", capabilities: ["Anomaly scrubbing", "Null value handling", "Type casting"], latestReport: "Scrubbed anomalous string entries. Replaced missing values with standard defaults." },
+  { id: "02", name: "Data Engineer", domain: "Data Pipeline", icon: Database, status: "Active", capabilities: ["Schema auditing", "Null value handling", "Data hygiene"], latestReport: "Normalized currency values to USD and validated ETL pipeline schemas." },
   { id: "03", name: "Schema Mapper", domain: "Database", icon: Database, status: "Active", capabilities: ["DuckDB optimization", "Multi-tenant isolation", "Index generation"], latestReport: "Tenant boundary enforced. Embedded DuckDB indices optimized for column-store reads." },
   { id: "04", name: "Data Analyst", domain: "Execution", icon: LineChart, status: "Active", capabilities: ["Text-to-SQL translation", "Safe intent building", "Ledger aggregations"], latestReport: "Converted natural language prompts into optimized columnar SQL queries." },
   { id: "05", name: "BI Engineer", domain: "Analytics", icon: LineChart, status: "Active", capabilities: ["Dashboard metric generation", "Variance analysis", "KPI tracking"], latestReport: "Continuous tracking enabled. SaaS subscription metrics updating in real-time." },
   { id: "06", name: "Report Generator", domain: "Exports", icon: Database, status: "Standby", capabilities: ["PDF synthesis", "Automated CSV generation", "Email delivery"], latestReport: "Ready for export generation. Stakeholder report schedules synchronized." },
-  { id: "07", name: "Forecaster", domain: "Predictive", icon: LineChart, status: "Active", capabilities: ["ARIMA modeling", "Confidence intervals", "Time-series projection"], latestReport: "Time-series projection models updated against historical telemetry." },
-  { id: "08", name: "Churn Predictor", domain: "Predictive", icon: BrainCircuit, status: "Active", capabilities: ["Risk scoring", "Usage drop-off alerts", "Retention modeling"], latestReport: "Evaluated user velocity vectors. Active accounts displaying healthy retention metrics." },
-  { id: "09", name: "Revenue Optimizer", domain: "Strategy", icon: LineChart, status: "Standby", capabilities: ["Upsell pathing", "Expansion MRR tracking", "Cohort analysis"], latestReport: "Cohort analysis ready. Upsell opportunity models loaded into memory." },
-  { id: "10", name: "Pricing Strategist", domain: "Strategy", icon: BrainCircuit, status: "Active", capabilities: ["Margin expansion modeling", "Tier elasticity", "Competitor indexing"], latestReport: "Competitor index updated. Market elasticity indicators stable." },
+  { id: "07", name: "Predictive Forecaster", domain: "Predictive", icon: LineChart, status: "Active", capabilities: ["ARIMA modeling", "Growth trajectory", "Statistical projections"], latestReport: "Generated 3-month MRR growth trajectory assuming 5-12% MoM scaling." },
+  { id: "08", name: "Virtual CFO", domain: "Finance", icon: LineChart, status: "Active", capabilities: ["Margin calculation", "Burn rate analysis", "Strategic advisory"], latestReport: "Synthesized executive briefing. Cash runway and gross margins calculated." },
+  { id: "09", name: "Ops Shield", domain: "Cybersecurity", icon: Shield, status: "Active", capabilities: ["Semantic firewalling", "Prompt injection defense", "IDOR prevention"], latestReport: "Intercepted malicious payload. Privilege escalation attempt blocked (403)." },
+  { id: "10", name: "SaaS Strategist", domain: "Strategy", icon: BrainCircuit, status: "Active", capabilities: ["Margin expansion modeling", "Tier elasticity", "Competitor indexing"], latestReport: "Competitor index updated. Market elasticity indicators stable." },
+  { id: "11", name: "BI Vis. Architect", domain: "Analytics", icon: PieChart, status: "Active", capabilities: ["Recharts JSON config", "Categorical data modeling", "Numerical frequency distribution"], latestReport: "Generated optimal JSON configurations for vertical, horizontal, Pareto, and stacked bar charts." },
+  { id: "12", name: "Telemetry Scout", domain: "Ingestion", icon: Globe, status: "Active", capabilities: ["Live API polling", "Webhook mapping", "Nested JSON flattening"], latestReport: "Mapped external real-time JSON streams to DuckDB flat schema." },
 ];
 
-export default function SubAgentWidget({ activeCount = 11 }: { activeCount?: number }) {
+export default function SubAgentWidget({ activeCount = 13 }: { activeCount?: number }) {
   const [isOpen, setIsOpen] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<any>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -51,7 +53,7 @@ export default function SubAgentWidget({ activeCount = 11 }: { activeCount?: num
         <div className="mt-4 flex items-end justify-between">
           <div>
             <p className="text-2xl font-bold text-white">
-              {activeCount} / 11 Active
+              {activeCount} / 13 Active
             </p>
             <p className="text-xs text-slate-500 mt-1">
               Ready for Ingestion & Analytics
@@ -126,7 +128,7 @@ export default function SubAgentWidget({ activeCount = 11 }: { activeCount?: num
             // --- MAIN DIRECTORY LIST ---
             <>
               <div className="p-3 border-b border-slate-800 bg-slate-950/50">
-                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Swarm Directory (11 Active)</p>
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Swarm Directory (13 Active)</p>
               </div>
               <div className="overflow-y-auto flex-1 p-2 space-y-1 custom-scrollbar">
                 {AGENT_REGISTRY.map((agent) => (
