@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, FormEvent, ChangeEvent } from "react";
 import { Terminal, CheckCircle, Loader2, AlertCircle, Shield, WifiOff } from "lucide-react";
-import { useClientId } from "./ClientContext";
+import { useClientId } from "../frontend/components/ClientContext";
 import { getAccessToken, setAccessToken, clearAccessToken, decodeTokenClientId } from "./authStore";
 
 interface LogStep {
@@ -15,15 +15,20 @@ interface LogStep {
 const MAX_PROMPT_LENGTH = 500;
 const SUBMISSION_COOLDOWN_MS = 1000;
 
+const getEnv = (key: string): string => {
+  const env = (globalThis as typeof globalThis & { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return env?.[key] ?? "";
+};
+
 export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessionId?: string }) {
-  let clientId = "default_client";
+  let clientId = "CLI-001";
   try {
-    const clientCtx = useClientId() as any;
+    const clientCtx = useClientId();
     if (clientCtx && clientCtx.clientId && typeof clientCtx.clientId === "string") {
       clientId = clientCtx.clientId.trim();
     }
   } catch (e) {
-    // Fallback to default if context is missing
+    // Fallback if rendered outside ClientProvider
   }
 
   const [logs, setLogs] = useState<LogStep[]>([]);
@@ -37,7 +42,7 @@ export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessi
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const pendingByAgent = useRef<Map<string, number[]>>(new Map());
   const lastSubmitTime = useRef<number>(0);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -55,9 +60,6 @@ export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessi
       return;
     }
 
-    // Split-brain guard: if the ClientContext tenant diverges from the
-    // JWT-verified tenant, the token is stale for this context — force
-    // re-auth rather than connecting under a mismatched identity.
     if (tokenClientId !== clientId) {
       clearAccessToken();
       setAuthError(true);
@@ -74,10 +76,9 @@ export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessi
 
     const connectWebSocket = () => {
       const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
-
-      // Dynamic host resolution: env var if available, otherwise local Uvicorn default (port 8000)
       const defaultHost = typeof window !== "undefined" && window.location.hostname ? `${window.location.hostname}:8000` : "127.0.0.1:8000";
-      const host = process.env.NEXT_PUBLIC_WS_URL?.replace(/^wss?:\/\//, '') || defaultHost;
+      const wsEnvUrl = getEnv("NEXT_PUBLIC_WS_URL");
+      const host = wsEnvUrl.replace(/^wss?:\/\//, '') || defaultHost;
 
       const wsUrl = `${protocol}//${host}/ws/swarm/${encodeURIComponent(tokenClientId)}/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(authToken)}`;
       const socket = new WebSocket(wsUrl);
@@ -137,7 +138,6 @@ export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessi
       socket.onclose = (event) => {
         if (isCurrent) {
           setConnected(false);
-          // 4008/4001: server-side auth rejection — don't retry, force re-auth
           if (event.code === 4008 || event.code === 4001) {
             setAuthError(true);
             clearAccessToken();
@@ -165,10 +165,10 @@ export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessi
     terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // DEV-ONLY: Authenticate Button Logic
   const handleDevAuth = async () => {
     try {
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+      const apiEnvUrl = getEnv("NEXT_PUBLIC_API_URL");
+      const baseUrl = apiEnvUrl || "http://127.0.0.1:8000";
       const res = await fetch(`${baseUrl}/api/auth/dev-token?client_id=${encodeURIComponent(clientId)}`);
 
       if (!res.ok) throw new Error("Failed to fetch dev token");

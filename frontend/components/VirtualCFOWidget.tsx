@@ -26,7 +26,8 @@ export default function VirtualCFOWidget({ refreshTrigger = 0 }: { refreshTrigge
     async function fetchCFOBriefing() {
       setLoading(true);
       try {
-        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+        // FIX: Hardcoded to 127.0.0.1:8000 to perfectly match the Uvicorn terminal output
+        const backendUrl = "http://127.0.0.1:8000";
         const token = typeof window !== 'undefined' ? sessionStorage.getItem('nexus_access_token') : null;
 
         const response = await fetch(`${backendUrl}/api/v1/finance/cfo-briefing`, {

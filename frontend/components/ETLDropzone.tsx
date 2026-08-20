@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { UploadCloud, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 
-export default function ETLDropzone() {
+export default function ETLDropzone({ onUploadSuccess }: { onUploadSuccess?: () => void }) {
   const [isHovering, setIsHovering] = useState(false);
   const [status, setStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -37,6 +37,7 @@ export default function ETLDropzone() {
       }
 
       setStatus('success');
+      onUploadSuccess?.();
       setTimeout(() => setStatus('idle'), 4000);
     } catch (err: any) {
       console.error("Upload error:", err);

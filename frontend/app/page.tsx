@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Cpu, Server, ShieldCheck } from 'lucide-react';
 import SubAgentWidget from '../components/SubAgentWidget';
 import SwarmLogStreamer from '../components/SwarmLogStreamer';
@@ -9,7 +9,7 @@ import CognitiveSearchBar from '../components/CognitiveSearchBar';
 import AdvancedAnalyticsDashboard from '../components/AdvancedAnalyticsDashboard';
 import VirtualCFOWidget from '../components/VirtualCFOWidget';
 import DataEngineerWidget from '../components/DataEngineerWidget';
-import FileDropzone from '../components/FileDropzone';
+import ETLDropzone from '../components/ETLDropzone';
 import { SwarmVisualizer } from '../components/SwarmVisualizer';
 
 interface HealthData {
@@ -19,10 +19,23 @@ interface HealthData {
   version: string;
 }
 
+interface SearchResult {
+  query: string;
+  synthesized_insight: string;
+  agent_breakdown: Array<{
+    agent_name: string;
+    domain: string;
+    output_summary: string;
+    raw_artifacts?: unknown;
+  }>;
+  confidence_score: number;
+  status: string;
+}
+
 export default function CoreDashboard() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
-  const [searchResult, setSearchResult] = useState<any>(null);
+  const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
   const [dashboardRefreshTrigger, setDashboardRefreshTrigger] = useState<number>(0);
 
   useEffect(() => {
@@ -93,7 +106,7 @@ export default function CoreDashboard() {
           <SubAgentWidget activeCount={health?.active_sub_agents} />
         </main>
 
-        <section><CognitiveSearchBar onQueryResult={(data: any) => setSearchResult(data)} /></section>
+        <section><CognitiveSearchBar onQueryResult={(data) => setSearchResult(data)} /></section>
         <section><SwarmLogStreamer sessionId="active_dashboard_session" /></section>
 
         {searchResult && (
@@ -112,7 +125,7 @@ export default function CoreDashboard() {
 
         {/* Automated Data Ingestion Section */}
         <section>
-          <FileDropzone onUploadSuccess={() => setDashboardRefreshTrigger(prev => prev + 1)} />
+          <ETLDropzone onUploadSuccess={() => setDashboardRefreshTrigger(prev => prev + 1)} />
         </section>
 
       </div>
