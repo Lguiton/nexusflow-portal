@@ -1,10 +1,14 @@
 fastapi
 uvicorn[standard]
+langgraph
 duckdb
 pandas
+numpy
+scipy
 openai
 PyJWT
 python-dotenv
 pydantic
 httpx
 python-multipart
+ 

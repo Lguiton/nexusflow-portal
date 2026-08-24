@@ -1,0 +1,90 @@
+components/__tests__/AssumptionLedger.test.tsx(11,20): error TS2503: Cannot find namespace 'jest'.
+components/__tests__/AssumptionLedger.test.tsx(22,1): error TS2304: Cannot find name 'beforeEach'.
+components/__tests__/AssumptionLedger.test.tsx(23,18): error TS2304: Cannot find name 'jest'.
+components/__tests__/AssumptionLedger.test.tsx(26,1): error TS2304: Cannot find name 'afterEach'.
+components/__tests__/AssumptionLedger.test.tsx(27,3): error TS2304: Cannot find name 'jest'.
+components/__tests__/AssumptionLedger.test.tsx(30,1): error TS2582: Cannot find name 'describe'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/AssumptionLedger.test.tsx(31,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/AssumptionLedger.test.tsx(50,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/AssumptionLedger.test.tsx(51,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/AssumptionLedger.test.tsx(52,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/AssumptionLedger.test.tsx(53,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/AssumptionLedger.test.tsx(54,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/AssumptionLedger.test.tsx(57,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/AssumptionLedger.test.tsx(58,22): error TS2503: Cannot find namespace 'jest'.
+components/__tests__/AssumptionLedger.test.tsx(67,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(18,20): error TS2503: Cannot find namespace 'jest'.
+components/__tests__/ClientContext.test.tsx(25,1): error TS2304: Cannot find name 'beforeEach'.
+components/__tests__/ClientContext.test.tsx(26,18): error TS2304: Cannot find name 'jest'.
+components/__tests__/ClientContext.test.tsx(30,1): error TS2304: Cannot find name 'afterEach'.
+components/__tests__/ClientContext.test.tsx(31,3): error TS2304: Cannot find name 'jest'.
+components/__tests__/ClientContext.test.tsx(34,1): error TS2582: Cannot find name 'describe'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/ClientContext.test.tsx(35,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/ClientContext.test.tsx(44,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(46,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(47,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(48,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(49,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(50,7): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(51,7): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(55,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/ClientContext.test.tsx(64,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(65,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(68,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/ClientContext.test.tsx(77,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(78,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(79,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(84,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/ClientContext.test.tsx(85,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/KnownGapsPanel.test.tsx(11,20): error TS2503: Cannot find namespace 'jest'.
+components/__tests__/KnownGapsPanel.test.tsx(31,1): error TS2304: Cannot find name 'beforeEach'.
+components/__tests__/KnownGapsPanel.test.tsx(32,18): error TS2304: Cannot find name 'jest'.
+components/__tests__/KnownGapsPanel.test.tsx(35,1): error TS2304: Cannot find name 'afterEach'.
+components/__tests__/KnownGapsPanel.test.tsx(36,3): error TS2304: Cannot find name 'jest'.
+components/__tests__/KnownGapsPanel.test.tsx(39,1): error TS2582: Cannot find name 'describe'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/KnownGapsPanel.test.tsx(40,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/KnownGapsPanel.test.tsx(50,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/KnownGapsPanel.test.tsx(51,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/KnownGapsPanel.test.tsx(54,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/KnownGapsPanel.test.tsx(59,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/KnownGapsPanel.test.tsx(62,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/KnownGapsPanel.test.tsx(67,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/KnownGapsPanel.test.tsx(68,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/KnownGapsPanel.test.tsx(69,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/SubAgentWidget.test.tsx(10,1): error TS2582: Cannot find name 'describe'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/SubAgentWidget.test.tsx(11,3): error TS2304: Cannot find name 'beforeEach'.
+components/__tests__/SubAgentWidget.test.tsx(12,20): error TS2304: Cannot find name 'jest'.
+components/__tests__/SubAgentWidget.test.tsx(15,3): error TS2304: Cannot find name 'afterEach'.
+components/__tests__/SubAgentWidget.test.tsx(16,5): error TS2304: Cannot find name 'jest'.
+components/__tests__/SubAgentWidget.test.tsx(19,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/SubAgentWidget.test.tsx(20,22): error TS2503: Cannot find namespace 'jest'.
+components/__tests__/SubAgentWidget.test.tsx(35,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SubAgentWidget.test.tsx(37,40): error TS2503: Cannot find namespace 'jest'.
+components/__tests__/SubAgentWidget.test.tsx(40,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/SubAgentWidget.test.tsx(42,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/SubAgentWidget.test.tsx(45,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/SubAgentWidget.test.tsx(46,22): error TS2503: Cannot find namespace 'jest'.
+components/__tests__/SubAgentWidget.test.tsx(55,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SubAgentWidget.test.tsx(56,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(29,20): error TS2503: Cannot find namespace 'jest'.
+components/__tests__/SwarmLogStreamer.test.tsx(39,1): error TS2304: Cannot find name 'beforeEach'.
+components/__tests__/SwarmLogStreamer.test.tsx(40,18): error TS2304: Cannot find name 'jest'.
+components/__tests__/SwarmLogStreamer.test.tsx(45,1): error TS2304: Cannot find name 'afterEach'.
+components/__tests__/SwarmLogStreamer.test.tsx(46,3): error TS2304: Cannot find name 'jest'.
+components/__tests__/SwarmLogStreamer.test.tsx(49,1): error TS2582: Cannot find name 'describe'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/SwarmLogStreamer.test.tsx(50,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/SwarmLogStreamer.test.tsx(54,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(55,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(60,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(63,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/SwarmLogStreamer.test.tsx(67,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(69,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(70,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(76,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(79,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/SwarmLogStreamer.test.tsx(83,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(91,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(92,5): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(95,3): error TS2582: Cannot find name 'it'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha`.
+components/__tests__/SwarmLogStreamer.test.tsx(99,25): error TS2304: Cannot find name 'expect'.
+components/__tests__/SwarmLogStreamer.test.tsx(106,25): error TS2304: Cannot find name 'expect'.
