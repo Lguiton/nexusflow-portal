@@ -3,6 +3,7 @@ import logging
 import asyncio
 import glob
 import statistics
+import uuid
 from pathlib import Path
 from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends
@@ -101,6 +102,41 @@ async def get_health():
         "active_agent_modules": active_agents,
         "version": "2.2.1 (Hardened Production Architecture)"
     }
+# FINOPS-01: real billing-overrun protection, not just monitoring. Composes
+# on top of the same real JWT auth every other endpoint already requires,
+# then checks this tenant's real ai_usage-derived monthly spend against
+# their optional cap (db_manager.check_budget_gate) before the request is
+# allowed to trigger another billable LLM call. No cap set (every tenant's
+# default) -> always allowed, identical to today's behavior. Applied so far
+# to the AI-calling endpoints below that take a plain client_id dependency
+# (search, CFO briefing, schema audit, BI summary, forecast, SaaS strategy,
+# chart suite, stakeholder report) -- the knowledge-base endpoints
+# (embeddings, a materially cheaper call) use a role-gated AuthenticatedUser
+# dependency instead and aren't wired to this gate yet; extending it there
+# is the same one-line composition, not done in this pass.
+async def enforce_budget_gate(client_id: str = Depends(verify_jwt_and_get_client_id)) -> str:
+    try:
+        from backend.db_manager import check_budget_gate
+        gate = await check_budget_gate(client_id)
+    except Exception as e:
+        # A failure to CHECK the budget must never itself block a tenant
+        # who may well be well under any cap -- same fail-open-on-telemetry-
+        # failure discipline as every audit/usage logger in db_manager.py.
+        # (Deliberately the opposite posture from Ops Shield, which
+        # fails CLOSED -- that is a security control; this is a billing
+        # control, and a billing-check outage should never look like a
+        # security block to the tenant.)
+        logger.error(f"Budget gate check failed for tenant '{client_id}', allowing request: {e}")
+        return client_id
+    if not gate.get("allowed", True):
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"Monthly AI usage cap reached (${gate['usage_usd']:.2f} of ${gate['cap_usd']:.2f}). "
+                "Raise or remove your cap in Settings to continue."
+            ),
+        )
+    return client_id
 # RBAC-01: /api/v1/auth/dev-login is retired, not just deprecated -- its
 # own comment said it "must be replaced, not just left in place" during
 # the auth-hardening pass, and this is that pass. Real signup/login/team
@@ -189,7 +225,7 @@ async def delete_ledger_endpoint(
 @app.post("/api/search")
 async def secure_cognitive_search(
     req: SearchRequest,
-    client_id: str = Depends(verify_jwt_and_get_client_id),
+    client_id: str = Depends(enforce_budget_gate),
 ):
     try:
         from backend.agents.ops_shield import analyze_threat
@@ -208,7 +244,7 @@ async def secure_cognitive_search(
         logger.error(f"Cognitive search routing error: {e}")
         raise HTTPException(status_code=502, detail="Search routing failed. Please try again.")
 @app.post("/api/v1/finance/cfo-briefing")
-async def get_cfo_briefing(client_id: str = Depends(verify_jwt_and_get_client_id)):
+async def get_cfo_briefing(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.virtual_cfo import generate_cfo_briefing
         result = await asyncio.to_thread(generate_cfo_briefing, client_id)
@@ -360,8 +396,70 @@ async def delete_byok_key(user: AuthenticatedUser = Depends(require_role("owner"
     except Exception as e:
         logger.error(f"BYOK delete error: {e}")
         raise HTTPException(status_code=502, detail="Could not remove your API key. Please try again.")
+
+
+# ---------------------------------------------------------------------------
+# FINOPS-01: per-tenant monthly AI spend cap -- settings + real gate check
+# (enforce_budget_gate above). Same shape as the BYOK settings endpoints
+# just above: GET is readable by any authenticated role on this tenant,
+# mutation is owner/admin only.
+# ---------------------------------------------------------------------------
+
+class BudgetCapRequest(BaseModel):
+    monthly_cap_usd: float = Field(..., gt=0)
+
+
+@app.get("/api/v1/settings/budget")
+async def get_budget_status(client_id: str = Depends(verify_jwt_and_get_client_id)):
+    try:
+        from backend.db_manager import check_budget_gate
+        return await check_budget_gate(client_id)
+    except Exception as e:
+        logger.error(f"Budget status check error: {e}")
+        raise HTTPException(status_code=502, detail="Could not check budget status.")
+
+
+@app.post("/api/v1/settings/budget")
+async def set_budget_cap(req: BudgetCapRequest, user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
+    try:
+        from backend.db_manager import set_tenant_budget_cap, check_budget_gate
+        await set_tenant_budget_cap(user.client_id, req.monthly_cap_usd)
+        return await check_budget_gate(user.client_id)
+    except Exception as e:
+        logger.error(f"Budget cap save error: {e}")
+        raise HTTPException(status_code=502, detail="Could not save your budget cap. Please try again.")
+
+
+@app.delete("/api/v1/settings/budget")
+async def delete_budget_cap(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
+    try:
+        from backend.db_manager import set_tenant_budget_cap, check_budget_gate
+        await set_tenant_budget_cap(user.client_id, None)
+        return await check_budget_gate(user.client_id)
+    except Exception as e:
+        logger.error(f"Budget cap delete error: {e}")
+        raise HTTPException(status_code=502, detail="Could not remove your budget cap. Please try again.")
+
+
+# ---------------------------------------------------------------------------
+# ENT-03: explainable-AI audit/lineage log -- read-only endpoints over
+# db_manager's hash-chained ai_lineage_log. Any authenticated tenant role
+# can view their own lineage (it's a transparency feature, not a mutation),
+# same access level as the ingestion-history endpoint above.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/audit/lineage")
+async def get_audit_lineage(limit: int = 100, client_id: str = Depends(verify_jwt_and_get_client_id)):
+    try:
+        from backend.db_manager import get_lineage_log, verify_lineage_chain
+        entries = await get_lineage_log(client_id, limit)
+        integrity = await verify_lineage_chain(client_id)
+        return {"entries": entries, "integrity": integrity}
+    except Exception as e:
+        logger.error(f"Audit lineage fetch error: {e}")
+        raise HTTPException(status_code=502, detail="Could not fetch the audit lineage log.")
 @app.post("/api/v1/data/schema-audit")
-async def run_schema_audit(client_id: str = Depends(verify_jwt_and_get_client_id)):
+async def run_schema_audit(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.data_engineer import analyze_schema_quality
         result = await asyncio.to_thread(analyze_schema_quality, client_id)
@@ -372,7 +470,7 @@ async def run_schema_audit(client_id: str = Depends(verify_jwt_and_get_client_id
 @app.post("/api/v1/bi/summary")
 async def get_bi_summary(
     req: BISummaryRequest = BISummaryRequest(),
-    client_id: str = Depends(verify_jwt_and_get_client_id),
+    client_id: str = Depends(enforce_budget_gate),
 ):
     try:
         from backend.agents.bi_engineer import generate_bi_summary
@@ -382,7 +480,7 @@ async def get_bi_summary(
         logger.error(f"BI Summary Error: {e}")
         raise HTTPException(status_code=502, detail="BI summary generation failed. Please try again.")
 @app.post("/api/v1/predictive/forecast")
-async def get_forecast(client_id: str = Depends(verify_jwt_and_get_client_id)):
+async def get_forecast(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.predictive_forecaster import generate_forecast
         result = await asyncio.to_thread(generate_forecast, client_id)
@@ -405,7 +503,7 @@ async def get_forecast_accuracy_endpoint(client_id: str = Depends(verify_jwt_and
         logger.error(f"Forecast Accuracy Error: {e}")
         raise HTTPException(status_code=502, detail="Forecast accuracy lookup failed. Please try again.")
 @app.post("/api/v1/saas/strategy")
-async def get_saas_strategy(client_id: str = Depends(verify_jwt_and_get_client_id)):
+async def get_saas_strategy(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.saas_strategist import generate_strategy
         result = await asyncio.to_thread(generate_strategy, client_id)
@@ -414,7 +512,7 @@ async def get_saas_strategy(client_id: str = Depends(verify_jwt_and_get_client_i
         logger.error(f"SaaS Strategist Error: {e}")
         raise HTTPException(status_code=502, detail="Strategy generation failed. Please try again.")
 @app.post("/api/v1/bi/chart-suite")
-async def get_chart_suite(client_id: str = Depends(verify_jwt_and_get_client_id)):
+async def get_chart_suite(client_id: str = Depends(enforce_budget_gate)):
     # generate_chart_suite is `async` and MUST be awaited directly here, on
     # this same running event loop -- NOT wrapped in asyncio.to_thread(...).
     # An earlier version did wrap it that way (matching
@@ -481,7 +579,7 @@ async def get_analytics_summary(client_id: str = Depends(verify_jwt_and_get_clie
         logger.error(f"Analytics Summary Error: {e}")
         raise HTTPException(status_code=502, detail="Analytics summary generation failed. Please try again.")
 @app.post("/api/v1/reports/stakeholder")
-async def get_stakeholder_report(client_id: str = Depends(verify_jwt_and_get_client_id)):
+async def get_stakeholder_report(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.report_generator import generate_stakeholder_report
         result = await asyncio.to_thread(generate_stakeholder_report, client_id)
@@ -489,3 +587,128 @@ async def get_stakeholder_report(client_id: str = Depends(verify_jwt_and_get_cli
     except Exception as e:
         logger.error(f"Report Generator Error: {e}")
         raise HTTPException(status_code=502, detail="Stakeholder report generation failed. Please try again.")
+
+
+# ---------------------------------------------------------------------------
+# Track 3: persistent vector RAG knowledge base (backend/app/core/rag.py).
+# Real embeddings, real Qdrant persistence, tenant-scoped on every call.
+# ---------------------------------------------------------------------------
+
+KNOWLEDGE_MAX_UPLOAD_BYTES = int(os.environ.get("EIVANTA_KNOWLEDGE_MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
+KNOWLEDGE_SUPPORTED_EXTENSIONS = {".txt", ".pdf"}
+
+
+def _extract_knowledge_text(file_path: str, ext: str) -> str:
+    """
+    Plain TEXT extraction for the knowledge base -- deliberately separate
+    from db_manager's PDF TABLE extraction (Track 3 ingestion uses
+    pdfplumber's extract_tables() for structured ledger rows; a policy/SOP
+    document is prose, so this uses extract_text() per page instead).
+    """
+    if ext == ".txt":
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except UnicodeDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"This .txt file's encoding could not be read ({e}). Try re-saving as UTF-8.")
+    if ext == ".pdf":
+        try:
+            import pdfplumber
+        except ImportError:
+            raise HTTPException(status_code=503, detail="PDF text extraction requires 'pdfplumber'. Run: pip install -r requirements.txt")
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                pages = [page.extract_text() or "" for page in pdf.pages]
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"This PDF could not be read: {e}.")
+        text = "\n\n".join(p for p in pages if p.strip())
+        if not text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="No text could be extracted from this PDF -- it's likely a scanned/image-only PDF (OCR isn't supported yet).",
+            )
+        return text
+    raise HTTPException(status_code=400, detail=f"Unsupported file type '{ext}'. Supported: {', '.join(sorted(KNOWLEDGE_SUPPORTED_EXTENSIONS))}.")
+
+
+@app.post("/api/v1/knowledge/upload")
+async def upload_knowledge_document(
+    file: UploadFile = File(...),
+    user: AuthenticatedUser = Depends(require_role("owner", "admin", "member")),
+):
+    client_id = user.client_id
+    safe_filename = Path(file.filename or "document.txt").name
+    ext = Path(safe_filename).suffix.lower()
+    if ext not in KNOWLEDGE_SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext or '(none)'}'. Supported: {', '.join(sorted(KNOWLEDGE_SUPPORTED_EXTENSIONS))}.",
+        )
+
+    temp_dir = Path("/tmp/eivanta_knowledge")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    file_path = temp_dir / f"{client_id}_{uuid.uuid4().hex}_{safe_filename}"
+    bytes_written = 0
+    try:
+        with open(file_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                bytes_written += len(chunk)
+                if bytes_written > KNOWLEDGE_MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Upload exceeds maximum allowed size.")
+                buffer.write(chunk)
+
+        text = _extract_knowledge_text(str(file_path), ext)
+
+        from backend.app.core.rag import add_document
+        doc_id = uuid.uuid4().hex
+        chunk_count = await asyncio.to_thread(add_document, client_id, doc_id, safe_filename, text)
+        return {"status": "SUCCESS", "doc_id": doc_id, "filename": safe_filename, "chunk_count": chunk_count}
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        logger.error(f"Knowledge base upload blocked by configuration: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error(f"Knowledge base upload error: {e}")
+        raise HTTPException(status_code=502, detail="Document indexing failed. Please try again.")
+    finally:
+        if file_path.exists():
+            file_path.unlink()
+
+
+class KnowledgeQueryRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    limit: int = Field(default=5, ge=1, le=20)
+
+
+@app.post("/api/v1/knowledge/query")
+async def query_knowledge_document(req: KnowledgeQueryRequest, client_id: str = Depends(verify_jwt_and_get_client_id)):
+    try:
+        from backend.app.core.rag import query_knowledge_base
+        results = await asyncio.to_thread(query_knowledge_base, client_id, req.query, req.limit)
+        return {"query": req.query, "results": results}
+    except Exception as e:
+        logger.error(f"Knowledge base query error: {e}")
+        raise HTTPException(status_code=502, detail="Knowledge base search failed. Please try again.")
+
+
+@app.get("/api/v1/knowledge/documents")
+async def list_knowledge_documents(client_id: str = Depends(verify_jwt_and_get_client_id)):
+    try:
+        from backend.app.core.rag import list_documents
+        docs = await asyncio.to_thread(list_documents, client_id)
+        return {"documents": docs}
+    except Exception as e:
+        logger.error(f"Knowledge base list error: {e}")
+        raise HTTPException(status_code=502, detail="Could not load knowledge base documents.")
+
+
+@app.delete("/api/v1/knowledge/documents/{doc_id}")
+async def delete_knowledge_document(doc_id: str, user: AuthenticatedUser = Depends(require_role("owner", "admin", "member"))):
+    try:
+        from backend.app.core.rag import delete_document
+        await asyncio.to_thread(delete_document, user.client_id, doc_id)
+        return {"status": "SUCCESS"}
+    except Exception as e:
+        logger.error(f"Knowledge base delete error: {e}")
+        raise HTTPException(status_code=502, detail="Could not delete this document.")

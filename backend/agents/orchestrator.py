@@ -4,9 +4,13 @@ import time
 from typing import Dict, Any, List, TypedDict, Optional
 from langgraph.graph import StateGraph, END
 try:
-    from backend.db_manager import log_task_execution
+    from backend.db_manager import (
+        log_task_execution, log_conversation_turn, get_conversation_history, log_lineage_entry_sync,
+    )
 except ImportError:
-    from db_manager import log_task_execution
+    from db_manager import (
+        log_task_execution, log_conversation_turn, get_conversation_history, log_lineage_entry_sync,
+    )
 try:
     from backend.websocket_manager import manager
 except ImportError:
@@ -21,6 +25,8 @@ class SwarmState(TypedDict):
     errors: List[str]
     connection_key: Optional[str]
     sample_payload: Optional[Any]
+    session_id: Optional[str]
+    conversation_history: List[Dict[str, Any]]
 def _in_running_loop() -> bool:
     try:
         asyncio.get_running_loop()
@@ -45,6 +51,33 @@ def _sync_broadcast(connection_key: Optional[str], agent: str, status: str, payl
         asyncio.run(manager.broadcast_agent_step(connection_key, agent, status, payload))
     except Exception as e:
         logger.error(f"Swarm broadcast failed for {connection_key}: {e}")
+# Track 4: multi-turn conversational memory. Mirrors the exact
+# _in_running_loop()-guarded asyncio.run() pattern already used by
+# _sync_log_task/_sync_broadcast above -- route_query() (which calls these)
+# is itself invoked via asyncio.to_thread() from main.py, so it never runs
+# inside an already-active event loop; these fail safe (return empty /
+# no-op) rather than raise if that assumption is ever violated.
+def _sync_get_history(client_id: str, session_id: Optional[str], limit: int = 6) -> List[Dict[str, Any]]:
+    if not session_id:
+        return []
+    if _in_running_loop():
+        logger.warning(f"Conversation history fetch skipped for {client_id}: already inside a running event loop.")
+        return []
+    try:
+        return asyncio.run(get_conversation_history(client_id, session_id, limit))
+    except Exception as e:
+        logger.error(f"Conversation history fetch failed for {client_id}: {e}")
+        return []
+def _sync_log_turn(client_id: str, session_id: Optional[str], role: str, content: str, agent_name: Optional[str] = None):
+    if not session_id:
+        return
+    if _in_running_loop():
+        logger.warning(f"Conversation turn logging skipped for {client_id}: already inside a running event loop.")
+        return
+    try:
+        asyncio.run(log_conversation_turn(client_id, session_id, role, content, agent_name))
+    except Exception as e:
+        logger.error(f"Conversation turn logging failed for {client_id}: {e}")
 def execute_virtual_cfo(state: SwarmState) -> SwarmState:
     start_time = time.time()
     connection_key = state.get("connection_key")
@@ -96,7 +129,16 @@ def execute_bi_engineer(state: SwarmState) -> SwarmState:
             from backend.agents.bi_engineer import generate_bi_summary
         except ImportError:
             from agents.bi_engineer import generate_bi_summary
-        state["results"]["bi_engineer"] = generate_bi_summary(state["client_id"], state["query"])
+        # Track 4: the first agent wired to real conversation history -- BI
+        # Engineer folds in the ad hoc Q&A duties (Data Analyst #04), making
+        # it the most naturally conversational agent (follow-up questions
+        # like "what about last month?" only resolve with real prior
+        # context). Other agents are one-shot briefings/reports today, not
+        # wired to history yet -- same honest partial-rollout discipline as
+        # BYOK's rollout (ops_shield.py first, rest mechanical follow-up).
+        state["results"]["bi_engineer"] = generate_bi_summary(
+            state["client_id"], state["query"], conversation_history=state.get("conversation_history") or []
+        )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
         _sync_log_task("bi_engineer", "COMPLETE", exec_time)
@@ -326,6 +368,11 @@ def _compute_confidence_score(agent_name: str, agent_result: Any) -> float:
     return 1.0
 def route_query(query: str, client_id: str, session_id: Optional[str] = None, sample_payload: Optional[Any] = None) -> dict:
     connection_key = f"{client_id}:{session_id}" if session_id else None
+    # Track 4: fetch this session's recent history BEFORE the graph runs so
+    # a routed agent can ground a follow-up question in what was actually
+    # asked/answered before. No session_id (e.g. a stateless API call) ->
+    # empty history, same behavior as before this track existed.
+    conversation_history = _sync_get_history(client_id, session_id)
     initial_state: SwarmState = {
         "client_id": client_id,
         "query": query,
@@ -334,14 +381,39 @@ def route_query(query: str, client_id: str, session_id: Optional[str] = None, sa
         "status": "PENDING",
         "errors": [],
         "connection_key": connection_key,
-        "sample_payload": sample_payload
+        "sample_payload": sample_payload,
+        "session_id": session_id,
+        "conversation_history": conversation_history,
     }
     final_state = app_graph.invoke(initial_state)
     active_agent = final_state.get("active_agent")
     agent_result = final_state.get("results", {}).get(active_agent)
+    synthesized_insight = _summarize_result(agent_result)
+    # Persist this exchange for the NEXT turn in this session. Logged after
+    # the graph completes, and logs whatever actually happened (including an
+    # ERROR-status turn) -- never fabricates a success turn that didn't occur.
+    _sync_log_turn(client_id, session_id, "user", query)
+    _sync_log_turn(client_id, session_id, "assistant", synthesized_insight, agent_name=active_agent)
+    # ENT-03: one real, hash-chained lineage entry per routed query -- the
+    # platform-wide "every query path" audit trail query_audit (SQL-03)
+    # never covered, since that table only ever logged BI Engineer's own
+    # NL-to-SQL requests. model_used is left unset here: each agent module
+    # picks its own model internally (model_registry.get_model) and that
+    # choice isn't surfaced back up to this scope today -- a reasonable
+    # future refinement, not silently guessed here.
+    final_status = final_state.get("status", "UNKNOWN")
+    decision_summary = f"Routed to '{active_agent}'. {synthesized_insight}"[:2000]
+    log_lineage_entry_sync(
+        client_id=client_id,
+        agent_name=active_agent,
+        query_text=query,
+        decision_summary=decision_summary,
+        status=final_status,
+        session_id=session_id,
+    )
     return {
         "query": query,
-        "synthesized_insight": _summarize_result(agent_result),
+        "synthesized_insight": synthesized_insight,
         "agent_breakdown": [
             {
                 "agent_name": active_agent,

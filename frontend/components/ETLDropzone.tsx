@@ -115,7 +115,7 @@ export default function ETLDropzone({ onUploadSuccess }: { onUploadSuccess?: () 
             Automated Data Ingestion (DuckDB)
           </h3>
           <p className="text-xs text-slate-400 mt-0.5">
-            Drop CSVs here to ingest structured financial logs into your live database.
+            Drop CSV, Excel, JSON, TXT, or PDF ledgers here to ingest financial logs into your live database.
           </p>
         </div>
       </div>
@@ -147,7 +147,7 @@ export default function ETLDropzone({ onUploadSuccess }: { onUploadSuccess?: () 
         >
           <input
             type="file"
-            accept=".csv"
+            accept=".csv,.txt,.xlsx,.xls,.json,.pdf"
             className="hidden"
             onChange={handleFileSelect}
             disabled={!authReady}
@@ -179,7 +179,7 @@ export default function ETLDropzone({ onUploadSuccess }: { onUploadSuccess?: () 
             <>
               <UploadCloud className="w-10 h-10 mb-3" />
               <p className="text-sm font-semibold text-white">
-                {authReady ? 'Drag & drop your CSV ledger here, or click to browse' : 'Authenticating...'}
+                {authReady ? 'Drag & drop your ledger here (CSV, Excel, JSON, TXT, PDF), or click to browse' : 'Authenticating...'}
               </p>
               <p className="text-xs mt-1">Uploading as tenant: <span className="text-cyan-400 font-mono">{clientId}</span></p>
             </>

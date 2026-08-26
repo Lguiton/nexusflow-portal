@@ -15,3 +15,7 @@ bcrypt
 stripe
 resend
 cryptography
+openpyxl
+xlrd
+pdfplumber
+qdrant-client

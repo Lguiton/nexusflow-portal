@@ -1,9 +1,10 @@
 import os
+import json
 import asyncio
 import threading
 import logging
 import hashlib
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 import duckdb
 import pandas as pd
@@ -156,6 +157,17 @@ async def init_db():
                 if "byok_openai_key_encrypted" not in tenant_cols:
                     try:
                         conn.execute("ALTER TABLE tenants ADD COLUMN byok_openai_key_encrypted VARCHAR")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                # FINOPS-01: per-tenant monthly AI spend cap, in USD. NULL
+                # (the default for every existing and new tenant) means "no
+                # cap set" -- unrestricted, identical to today's behavior --
+                # never a silent 0/blocked-by-default state. Same idempotent
+                # migration shape as the BYOK-01 column above.
+                if "monthly_ai_budget_usd" not in tenant_cols:
+                    try:
+                        conn.execute("ALTER TABLE tenants ADD COLUMN monthly_ai_budget_usd DOUBLE")
                     except Exception as e:
                         if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
                             raise
@@ -537,6 +549,315 @@ async def get_tenant_byok_key_encrypted(client_id: str) -> Optional[str]:
             finally:
                 conn.close()
     return await asyncio.to_thread(_get)
+
+
+# ==============================================================================
+# FINOPS-01: real billing-overrun protection. AI-06's token/cost telemetry
+# (log_ai_usage / the ai_usage table above) already recorded every real
+# call's tokens and estimated USD cost per tenant -- that was monitoring,
+# not a cap. This is the enforcement half: an optional per-tenant monthly
+# USD cap plus a real gate check that aggregates this month's actual
+# ai_usage rows and reports whether the NEXT call should be allowed.
+# ==============================================================================
+
+async def set_tenant_budget_cap(client_id: str, cap_usd: Optional[float]) -> None:
+    """cap_usd=None clears the cap (back to unrestricted) -- mirrors
+    set_tenant_byok_key's None-clears convention."""
+    lock = get_db_lock()
+
+    def _update():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "UPDATE tenants SET monthly_ai_budget_usd = ? WHERE client_id = ?",
+                    [cap_usd, client_id],
+                )
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_update)
+
+
+async def get_tenant_budget_cap(client_id: str) -> Optional[float]:
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT monthly_ai_budget_usd FROM tenants WHERE client_id = ?",
+                    [client_id],
+                ).fetchone()
+                return row[0] if row else None
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def get_monthly_ai_usage(client_id: str) -> dict:
+    """
+    Real aggregation of this tenant's ai_usage rows for the current
+    calendar month (server clock, UTC-naive CURRENT_TIMESTAMP -- same
+    clock every other timestamp column in this file already uses).
+    usage_usd is a SUM over estimated_cost_usd, which is NULL for any
+    call made with a model absent from MODEL_PRICING -- those calls'
+    tokens are still counted in usage_tokens/call_count, but do not
+    silently count as $0 toward the dollar cap (SUM ignores NULLs; an
+    entirely-unpriced month correctly reports usage_usd=0.0 rather than
+    a fabricated number, and is flagged via priced_call_count vs
+    call_count so that distinction isn't hidden).
+    """
+    lock = get_db_lock()
+
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+                if "ai_usage" not in tables:
+                    return {"usage_usd": 0.0, "usage_tokens": 0, "call_count": 0, "priced_call_count": 0}
+                row = conn.execute("""
+                    SELECT
+                        COALESCE(SUM(estimated_cost_usd), 0.0),
+                        COALESCE(SUM(total_tokens), 0),
+                        COUNT(*),
+                        COUNT(estimated_cost_usd)
+                    FROM ai_usage
+                    WHERE client_id = ?
+                      AND date_trunc('month', timestamp) = date_trunc('month', CURRENT_TIMESTAMP)
+                """, [client_id]).fetchone()
+                return {
+                    "usage_usd": float(row[0]),
+                    "usage_tokens": int(row[1]),
+                    "call_count": int(row[2]),
+                    "priced_call_count": int(row[3]),
+                }
+            except Exception as e:
+                logger.error(f"Failed to aggregate monthly AI usage for tenant '{client_id}': {e}")
+                return {"usage_usd": 0.0, "usage_tokens": 0, "call_count": 0, "priced_call_count": 0}
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
+async def check_budget_gate(client_id: str) -> dict:
+    """
+    The real gate check. No cap set (the default for every tenant) ->
+    always allowed=True, identical to today's unrestricted behavior. A cap
+    set and this month's real usage_usd already at or over it -> allowed
+    False, with the actual numbers so the caller (main.py) can return an
+    honest, specific 402 rather than a generic block.
+    """
+    cap_usd = await get_tenant_budget_cap(client_id)
+    usage = await get_monthly_ai_usage(client_id)
+    if cap_usd is None:
+        return {"allowed": True, "cap_usd": None, **usage, "pct_used": None}
+    pct_used = round((usage["usage_usd"] / cap_usd) * 100, 1) if cap_usd > 0 else 100.0
+    allowed = usage["usage_usd"] < cap_usd
+    return {"allowed": allowed, "cap_usd": cap_usd, **usage, "pct_used": pct_used}
+
+
+# ==============================================================================
+# ENT-03: explainable-AI audit/lineage log. query_audit (SQL-03, above)
+# already records BI Engineer's own NL-to-SQL requests specifically; this
+# is the platform-wide counterpart the backlog calls for -- one entry per
+# real agent invocation, across whichever agent orchestrator.route_query
+# actually routes a query to, not just SQL generation. "Immutable" is made
+# a real, checkable property via a per-tenant SHA-256 hash chain (each
+# row's row_hash covers its own fields plus the previous row's hash for
+# THAT tenant) rather than an unenforced claim -- verify_lineage_chain
+# below recomputes the chain and reports the first row where it breaks, if
+# any. This does not prevent a row being edited directly in the database
+# file (nothing short of a separate write-once store could) -- what it
+# gives is tamper EVIDENCE: any such edit is detectable and reported, not
+# silently trusted.
+# ==============================================================================
+
+def _lineage_row_hash(
+    prev_hash: str, client_id: str, session_id: str, agent_name: str,
+    model_used: str, query_text: str, decision_summary: str, status: str, timestamp_iso: str,
+) -> str:
+    payload = "|".join([
+        prev_hash or "", client_id or "", session_id or "", agent_name or "",
+        model_used or "", query_text or "", decision_summary or "", status or "", timestamp_iso or "",
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def log_lineage_entry(
+    client_id: str, agent_name: str, query_text: str, decision_summary: str, status: str,
+    session_id: Optional[str] = None, model_used: Optional[str] = None,
+) -> None:
+    """
+    Records one real routing/agent decision into this tenant's hash-chained
+    lineage log. Deliberately never raises -- same discipline as every
+    other audit-log writer in this file: a failure to WRITE lineage must
+    never block the response the tenant is waiting on.
+    """
+    if not client_id:
+        return
+    lock = get_db_lock()
+
+    def _log():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute("BEGIN TRANSACTION")
+                conn.execute("""
+                    CREATE SEQUENCE IF NOT EXISTS ai_lineage_log_id_seq;
+                    CREATE TABLE IF NOT EXISTS ai_lineage_log (
+                        lineage_id BIGINT DEFAULT nextval('ai_lineage_log_id_seq'),
+                        timestamp TIMESTAMP,
+                        client_id VARCHAR,
+                        session_id VARCHAR,
+                        agent_name VARCHAR,
+                        model_used VARCHAR,
+                        query_text VARCHAR,
+                        decision_summary VARCHAR,
+                        status VARCHAR,
+                        prev_hash VARCHAR,
+                        row_hash VARCHAR
+                    )
+                """)
+                # Prior hash is scoped to THIS tenant only -- reading and
+                # inserting inside the same lock/transaction avoids two
+                # concurrent writes for one tenant forking the chain.
+                prev = conn.execute(
+                    "SELECT row_hash FROM ai_lineage_log WHERE client_id = ? "
+                    "ORDER BY lineage_id DESC LIMIT 1",
+                    [client_id]
+                ).fetchone()
+                prev_hash = prev[0] if prev else ""
+                timestamp_iso = datetime.utcnow().isoformat()
+                row_hash = _lineage_row_hash(
+                    prev_hash, client_id, session_id or "", agent_name or "",
+                    model_used or "", query_text or "", decision_summary or "", status or "", timestamp_iso
+                )
+                conn.execute(
+                    "INSERT INTO ai_lineage_log "
+                    "(timestamp, client_id, session_id, agent_name, model_used, query_text, decision_summary, status, prev_hash, row_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [timestamp_iso, client_id, session_id, agent_name, model_used,
+                     query_text, decision_summary, status, prev_hash, row_hash]
+                )
+                conn.execute("COMMIT")
+            except Exception as e:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                logger.error(f"Failed to log lineage entry for tenant '{client_id}': {e}")
+            finally:
+                conn.close()
+    await asyncio.to_thread(_log)
+
+
+def log_lineage_entry_sync(
+    client_id: str, agent_name: str, query_text: str, decision_summary: str, status: str,
+    session_id: Optional[str] = None, model_used: Optional[str] = None,
+) -> None:
+    """Sync wrapper -- same _in_running_loop()-guarded asyncio.run() shape
+    already established by log_ai_usage_sync below, for callers (agent
+    modules) that aren't themselves async."""
+    if _in_running_loop_db():
+        logger.warning(f"Lineage logging skipped for agent '{agent_name}': already inside a running event loop.")
+        return
+    try:
+        asyncio.run(log_lineage_entry(client_id, agent_name, query_text, decision_summary, status, session_id, model_used))
+    except Exception as e:
+        logger.error(f"Sync lineage logging failed for agent '{agent_name}': {e}")
+
+
+async def get_lineage_log(client_id: str, limit: int = 100) -> list:
+    """Tenant-scoped read, most recent first."""
+    if not client_id:
+        return []
+    limit = max(1, min(int(limit), 500))
+    lock = get_db_lock()
+
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+                if "ai_lineage_log" not in tables:
+                    return []
+                rows = conn.execute("""
+                    SELECT lineage_id, timestamp, session_id, agent_name, model_used,
+                           query_text, decision_summary, status, prev_hash, row_hash
+                    FROM ai_lineage_log
+                    WHERE client_id = ?
+                    ORDER BY lineage_id DESC
+                    LIMIT ?
+                """, [client_id, limit]).fetchall()
+                return [
+                    {
+                        "lineage_id": r[0], "timestamp": str(r[1]), "session_id": r[2],
+                        "agent_name": r[3], "model_used": r[4], "query_text": r[5],
+                        "decision_summary": r[6], "status": r[7], "prev_hash": r[8], "row_hash": r[9],
+                    }
+                    for r in rows
+                ]
+            except Exception as e:
+                logger.error(f"Failed to fetch lineage log for tenant '{client_id}': {e}")
+                return []
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
+async def verify_lineage_chain(client_id: str) -> dict:
+    """
+    Recomputes this tenant's hash chain from scratch (oldest to newest) and
+    compares every stored row_hash/prev_hash against what the recorded
+    fields actually hash to. This is the genuine tamper-evidence check
+    behind the "immutable" claim above -- intact=True means every row's
+    hash is consistent with its own fields and its predecessor; intact
+    stays honest (never assumed True) for a tenant with zero lineage rows,
+    reported via row_count instead.
+    """
+    if not client_id:
+        return {"intact": True, "row_count": 0, "first_break_lineage_id": None}
+    lock = get_db_lock()
+
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+                if "ai_lineage_log" not in tables:
+                    return {"intact": True, "row_count": 0, "first_break_lineage_id": None}
+                rows = conn.execute("""
+                    SELECT lineage_id, timestamp, session_id, agent_name, model_used,
+                           query_text, decision_summary, status, prev_hash, row_hash
+                    FROM ai_lineage_log
+                    WHERE client_id = ?
+                    ORDER BY lineage_id ASC
+                """, [client_id]).fetchall()
+                expected_prev = ""
+                for r in rows:
+                    (lineage_id, timestamp, session_id, agent_name, model_used,
+                     query_text, decision_summary, status, prev_hash, row_hash) = r
+                    timestamp_iso = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+                    if prev_hash != expected_prev:
+                        return {"intact": False, "row_count": len(rows), "first_break_lineage_id": lineage_id}
+                    recomputed = _lineage_row_hash(
+                        prev_hash, client_id, session_id or "", agent_name or "",
+                        model_used or "", query_text or "", decision_summary or "", status or "", timestamp_iso
+                    )
+                    if recomputed != row_hash:
+                        return {"intact": False, "row_count": len(rows), "first_break_lineage_id": lineage_id}
+                    expected_prev = row_hash
+                return {"intact": True, "row_count": len(rows), "first_break_lineage_id": None}
+            except Exception as e:
+                logger.error(f"Failed to verify lineage chain for tenant '{client_id}': {e}")
+                return {"intact": False, "row_count": 0, "first_break_lineage_id": None, "error": str(e)}
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
 def _parse_amount_series(series: pd.Series) -> pd.Series:
     text = series.astype(str).str.strip()
     text = text.str.replace(r'^\((.*)\)$', r'-\1', regex=True)
@@ -620,6 +941,166 @@ def _read_csv_or_raise(file_path: str) -> pd.DataFrame:
             f"This file's text encoding could not be read ({e}). Try re-saving it as "
             "UTF-8 CSV and uploading again."
         )
+
+
+# Track 3 (multi-format ingestion): supported upload extensions, checked
+# against the ORIGINAL filename the user uploaded -- not sniffed from file
+# content, so a mislabeled file gets a clear "this isn't really a .csv"
+# style error from the format-specific reader below, rather than a
+# confusing failure two layers deeper.
+SUPPORTED_INGEST_EXTENSIONS = {".csv", ".txt", ".xlsx", ".xls", ".json", ".pdf"}
+
+
+def _read_excel_or_raise(file_path: str) -> pd.DataFrame:
+    """
+    Multi-sheet support: every sheet in the workbook is read and
+    concatenated into one DataFrame (a "source_sheet" column records which
+    sheet each row came from, dropped again before the normal amount/
+    category/date column detection below -- it's provenance, not ledger
+    data). A sheet that fails to parse is skipped with its error recorded,
+    rather than failing the whole upload for one bad tab -- but if EVERY
+    sheet fails, that's surfaced as a real error, not a silent empty
+    ingest.
+    """
+    try:
+        sheets = pd.read_excel(file_path, sheet_name=None)
+    except Exception as e:
+        raise ValueError(
+            f"This Excel file could not be opened: {e}. Make sure it's a valid "
+            ".xlsx/.xls file and isn't corrupted or password-protected."
+        )
+    if not sheets:
+        raise ValueError("This Excel file has no sheets.")
+    frames = []
+    sheet_errors = []
+    for name, sheet_df in sheets.items():
+        if sheet_df is None or sheet_df.empty:
+            continue
+        try:
+            sheet_df = sheet_df.copy()
+            sheet_df["source_sheet"] = name
+            frames.append(sheet_df)
+        except Exception as e:
+            sheet_errors.append(f"{name}: {e}")
+    if not frames:
+        detail = f" Errors: {'; '.join(sheet_errors)}" if sheet_errors else ""
+        raise ValueError(f"No usable data found in any sheet of this Excel file.{detail}")
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def _read_json_or_raise(file_path: str) -> pd.DataFrame:
+    """
+    Accepts either a top-level JSON array of row objects (the common case)
+    or a top-level object with a single array-valued field holding the
+    rows (e.g. {"transactions": [...]})  -- picks the first array-valued
+    field found in that case, since there's no universal convention for
+    what that field is called.
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"This file could not be parsed as valid JSON: {e}.")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"This file's text encoding could not be read ({e}). Try re-saving it as UTF-8.")
+
+    if isinstance(raw, list):
+        records = raw
+    elif isinstance(raw, dict):
+        array_fields = [v for v in raw.values() if isinstance(v, list)]
+        if not array_fields:
+            raise ValueError(
+                "This JSON file's top level is an object with no array field to read rows "
+                "from. Expected either a top-level array of records, or an object with one "
+                "field holding an array of records (e.g. {\"transactions\": [...]})."
+            )
+        records = array_fields[0]
+    else:
+        raise ValueError("This JSON file's top level must be an array or an object, not a bare value.")
+
+    try:
+        return pd.json_normalize(records)
+    except Exception as e:
+        raise ValueError(f"This JSON file's records could not be read into a table: {e}.")
+
+
+def _read_pdf_or_raise(file_path: str) -> pd.DataFrame:
+    """
+    Best-effort: extracts every table pdfplumber finds across every page
+    and stacks rows from tables whose first row looks like a real header
+    (at least 2 non-empty cells). This handles the common case -- a real
+    tabular ledger export saved as PDF -- but NOT scanned/image-only PDFs
+    (no text layer to extract) or PDFs whose "table" is actually loose
+    text with no real grid structure; both come back as a clear error
+    rather than silently returning nothing useful.
+    """
+    try:
+        import pdfplumber
+    except ImportError as e:
+        raise ValueError(
+            "PDF ingestion requires the 'pdfplumber' package, which isn't installed on "
+            "this server yet. Run: pip install -r requirements.txt"
+        ) from e
+
+    frames = []
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                for table in (page.extract_tables() or []):
+                    if not table or len(table) < 2:
+                        continue
+                    header, *rows = table
+                    if sum(1 for c in header if c and str(c).strip()) < 2:
+                        continue
+                    header = [str(c).strip() if c else f"col_{i}" for i, c in enumerate(header)]
+                    frames.append(pd.DataFrame(rows, columns=header))
+    except Exception as e:
+        raise ValueError(f"This PDF could not be read: {e}.")
+
+    if not frames:
+        raise ValueError(
+            "No table-like data could be extracted from this PDF. This usually means it's a "
+            "scanned/image-only PDF (no real text layer -- OCR isn't supported yet), or its "
+            "content isn't laid out as a real table pdfplumber can detect. Try exporting as "
+            "CSV or Excel instead."
+        )
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def _read_ledger_file_or_raise(file_path: str, original_filename: str) -> pd.DataFrame:
+    """
+    Track 3 (multi-format ingestion): dispatches to a format-specific
+    reader by the ORIGINAL upload filename's extension. Every reader below
+    returns a plain DataFrame in whatever raw columns the source file had
+    -- the amount/category/date/description normalization in
+    ingest_csv_to_db() runs identically afterward regardless of source
+    format, so a correctly-shaped Excel or JSON upload behaves exactly
+    like a correctly-shaped CSV from that point on.
+    """
+    ext = os.path.splitext(original_filename)[1].lower()
+    if ext not in SUPPORTED_INGEST_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported file type '{ext or '(none)'}'. Supported formats: "
+            f"{', '.join(sorted(SUPPORTED_INGEST_EXTENSIONS))}."
+        )
+    if ext == ".csv":
+        return _read_csv_or_raise(file_path)
+    if ext == ".txt":
+        # Delimiter-sniffed rather than assumed comma -- a .txt export is
+        # just as likely to be tab- or semicolon-delimited.
+        try:
+            return pd.read_csv(file_path, sep=None, engine="python")
+        except pd.errors.EmptyDataError:
+            raise ValueError("This file is empty -- no header row or data was found.")
+        except Exception as e:
+            raise ValueError(f"This .txt file could not be parsed as delimited data: {e}.")
+    if ext in (".xlsx", ".xls"):
+        return _read_excel_or_raise(file_path)
+    if ext == ".json":
+        return _read_json_or_raise(file_path)
+    if ext == ".pdf":
+        return _read_pdf_or_raise(file_path)
+    raise ValueError(f"Unsupported file type '{ext}'.")  # unreachable given the check above
 async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: str = None) -> str:
     if not client_id:
         raise ValueError("client_id is required for tenant-isolated ingestion.")
@@ -629,7 +1110,7 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
     display_name = original_filename or os.path.basename(file_path)
 
     try:
-        df = _read_csv_or_raise(file_path)
+        df = _read_ledger_file_or_raise(file_path, display_name)
 
         # DATA-03: a genuinely empty file (header only, or truly nothing)
         # previously sailed through as "Successfully ingested 0 records" --
@@ -1432,6 +1913,99 @@ async def get_ingestion_history(client_id: str, limit: int = 20) -> list:
                 ]
             except Exception as e:
                 logger.error(f"Failed to fetch ingestion history for tenant '{client_id}': {e}")
+                return []
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
+# ==============================================================================
+# Track 4: multi-turn conversational memory. session_id previously only fed
+# a WebSocket connection_key string (orchestrator.py) and was never used to
+# fetch, store, or pass real conversation history to any agent -- every
+# question was answered as if it were the first one ever asked. This is the
+# real persistence layer: lazy CREATE-TABLE-on-first-write, same pattern as
+# log_query_audit/log_ingestion_attempt above, no separate startup migration.
+# ==============================================================================
+
+async def log_conversation_turn(
+    client_id: str, session_id: str, role: str, content: str, agent_name: Optional[str] = None
+) -> None:
+    """
+    Persist one turn (role is "user" or "assistant") of a tenant's
+    conversation with the AI swarm. A write failure here must never block
+    the response the tenant is waiting on -- same discipline as the other
+    audit-log writers in this file: logged and swallowed, never re-raised.
+    """
+    if not client_id or not session_id:
+        return
+    lock = get_db_lock()
+    def _log():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute("BEGIN TRANSACTION")
+                conn.execute("""
+                    CREATE SEQUENCE IF NOT EXISTS conversation_turns_id_seq;
+                    CREATE TABLE IF NOT EXISTS conversation_turns (
+                        turn_id BIGINT DEFAULT nextval('conversation_turns_id_seq'),
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        client_id VARCHAR,
+                        session_id VARCHAR,
+                        role VARCHAR,
+                        content VARCHAR,
+                        agent_name VARCHAR
+                    )
+                """)
+                conn.execute(
+                    "INSERT INTO conversation_turns (client_id, session_id, role, content, agent_name) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [client_id, session_id, role, content, agent_name]
+                )
+                conn.execute("COMMIT")
+            except Exception as e:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                logger.error(f"Failed to log conversation turn: {e}")
+            finally:
+                conn.close()
+    await asyncio.to_thread(_log)
+
+
+async def get_conversation_history(client_id: str, session_id: str, limit: int = 6) -> list:
+    """
+    The last `limit` turns for this tenant+session, oldest first (the shape
+    an LLM prompt wants). Tenant- AND session-scoped: client_id is always
+    part of the WHERE clause so one tenant's session_id can never surface
+    another tenant's conversation, even if two sessions ever collided.
+    Returns [] (never raises) on any failure or if no turns exist yet, so a
+    brand-new session degrades to today's no-history behavior instead of
+    erroring.
+    """
+    if not client_id or not session_id:
+        return []
+    limit = max(1, min(int(limit), 50))
+    lock = get_db_lock()
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH, read_only=True)
+            try:
+                tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+                if "conversation_turns" not in tables:
+                    return []
+                rows = conn.execute(
+                    "SELECT role, content, agent_name, timestamp FROM conversation_turns "
+                    "WHERE client_id = ? AND session_id = ? ORDER BY timestamp DESC LIMIT ?",
+                    [client_id, session_id, limit]
+                ).fetchall()
+                return [
+                    {"role": r[0], "content": r[1], "agent_name": r[2], "timestamp": str(r[3])}
+                    for r in reversed(rows)
+                ]
+            except Exception as e:
+                logger.error(f"Failed to fetch conversation history for tenant '{client_id}': {e}")
                 return []
             finally:
                 conn.close()

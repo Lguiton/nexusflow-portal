@@ -24,6 +24,12 @@ AGENT_MODELS = {
     "ops_shield": "gpt-4o-mini",
     "bi_visualization_architect": "gpt-4o-mini",
     "external_telemetry_scout": "gpt-4o-mini",
+    # Track 3 (persistent vector RAG): embedding model, not a chat model --
+    # 1536-dim output, which app/core/rag.py's Qdrant collection is sized
+    # for. Changing this later means re-embedding every existing document,
+    # not just updating this entry -- flag that explicitly if it ever
+    # changes.
+    "knowledge_base_embedding": "text-embedding-3-small",
 }
 
 # One entry per deliberate model change -- append, never rewrite history.
@@ -44,6 +50,7 @@ REGISTRY_CHANGELOG = [
     {"date": "2026-08-23", "agent_key": "ops_shield", "model": "gpt-4o-mini", "note": "Migrated from inline hardcoding to centralized registry -- model unchanged."},
     {"date": "2026-08-23", "agent_key": "bi_visualization_architect", "model": "gpt-4o-mini", "note": "Migrated from inline hardcoding to centralized registry -- model unchanged."},
     {"date": "2026-08-23", "agent_key": "external_telemetry_scout", "model": "gpt-4o-mini", "note": "Migrated from inline hardcoding to centralized registry -- model unchanged."},
+    {"date": "2026-08-26", "agent_key": "knowledge_base_embedding", "model": "text-embedding-3-small", "note": "New entry -- backing the real persistent vector RAG knowledge base (app/core/rag.py), replacing the previous hardcoded fake 4-dim vector stub."},
 ]
 
 

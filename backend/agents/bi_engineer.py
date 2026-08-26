@@ -434,7 +434,35 @@ def _template_insights(category_breakdown: Dict[str, Any], total_records: int) -
     return insights[:3]
 
 
-def generate_bi_summary(client_id: str = "default_client", query: str = "") -> Dict[str, Any]:
+def _format_history_for_prompt(conversation_history: Optional[List[Dict[str, Any]]]) -> str:
+    """
+    Track 4: renders the last few real turns of this session (fetched by
+    orchestrator.route_query from db_manager.get_conversation_history) as
+    plain transcript text for the LLM prompt below. Deliberately NOT
+    inserted into query-intent translation (_ask_llm_for_query_intent) --
+    that path stays a closed whitelist translation with no free-text
+    context, per SQL-01/SQL-04. History only ever reaches the narrative
+    insight-generation prompt, never the SQL-generating one.
+    """
+    if not conversation_history:
+        return ""
+    lines = []
+    for turn in conversation_history:
+        role = turn.get("role", "user")
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return "\n    Recent conversation in this session (oldest first):\n    " + "\n    ".join(lines)
+
+
+def generate_bi_summary(
+    client_id: str = "default_client",
+    query: str = "",
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
     Agent #05 (BI Engineer). Two things happen here now:
     (1) the original categorical-breakdown summary (unchanged from before),
@@ -442,6 +470,13 @@ def generate_bi_summary(client_id: str = "default_client", query: str = "") -> D
     via _answer_data_question above -- the Data Analyst (#04) duties folded
     into this agent per founder decision, now that #04 was confirmed (via
     git history) to have never been a real implementation.
+
+    Track 4: `conversation_history` (optional, default []) is real prior
+    turns for this session -- when present it's included in the narrative
+    LLM prompt below so a follow-up like "what about last month?" resolves
+    against what was actually asked/answered before, instead of being
+    answered blind every time. Callers that don't pass it (or pass none)
+    get today's exact behavior -- this is additive, not a breaking change.
 
     Note on cost: this now makes a second LLM call (query-intent
     translation) on every invocation where `query` is non-empty, even a
@@ -516,12 +551,20 @@ def generate_bi_summary(client_id: str = "default_client", query: str = "") -> D
     Ground any relevant insight in this real answer -- do not restate the
     numbers differently than shown."""
 
+    history_block = _format_history_for_prompt(conversation_history)
     system_prompt = f"""
     You are Agent #05, Eivanta's Business Intelligence Engineer.
     Tenant: {safe_client_id}
     Categorical Data Summary: {json.dumps(category_breakdown)}
     Total Ledger Records: {total_records}
     {query_context_block}
+    {history_block}
+    If the recent conversation above contains a relevant follow-up question
+    (e.g. referring to "that", "it", "last month" without repeating the
+    original subject), use it to inform which insight is most relevant --
+    but every number in your insights must still come only from the real
+    Categorical Data Summary / query answer above, never from the
+    conversation text itself.
     Provide exactly 3 executive BI insights focusing on categorical distribution, revenue concentration, and cost drivers.
     Respond STRICTLY in JSON: {{"insights": ["...", "...", "..."]}}
     """
