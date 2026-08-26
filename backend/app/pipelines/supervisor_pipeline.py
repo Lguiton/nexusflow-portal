@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Any
 
-logger = logging.getLogger("nexusflow.pipeline.supervisor_pipeline")
+logger = logging.getLogger("eivanta.pipeline.supervisor_pipeline")
 
 class SupervisorPipelineManager:
     """

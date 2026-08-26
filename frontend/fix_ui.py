@@ -6,7 +6,7 @@ export default function Dashboard() {
     ~main className="p-8 bg-gray-50 min-h-screen"^
       ~div className="max-w-6xl mx-auto"^
         ~header className="mb-8 border-b pb-4"^
-          ~h1 className="text-3xl font-bold text-gray-900"^NexusFlow Intelligence~/h1^
+          ~h1 className="text-3xl font-bold text-gray-900"^Eivanta Intelligence~/h1^
           ~p className="text-gray-500 mt-1"^Predictive Analytics & IT Operations~/p^
         ~/header^
         ~section className="mb-8 bg-white p-6 rounded-xl shadow-sm border border-gray-100"^

@@ -221,7 +221,7 @@ export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessi
         <div className="flex items-center gap-2">
           <Terminal className="w-5 h-5 text-indigo-400" />
           <h3 className="font-semibold text-sm flex items-center gap-2">
-            NexusFlow Live Swarm Telemetry
+            Eivanta Live Swarm Telemetry
             <Shield className="w-4 h-4 text-emerald-400" />
           </h3>
         </div>

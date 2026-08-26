@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import glob
+import statistics
 from pathlib import Path
 from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 from backend.db_manager import ingest_csv_to_db
-from backend.auth import verify_jwt_and_get_client_id, JWT_SECRET, JWT_ALGORITHM, sanitize_client_id
+from backend.auth import verify_jwt_and_get_client_id, require_role, AuthenticatedUser
 def get_active_agent_count() -> int:
     try:
         agents_dir = os.path.join(os.path.dirname(__file__), 'agents')
@@ -20,8 +21,13 @@ def get_active_agent_count() -> int:
     except Exception:
         return 0
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("nexusflow.supervisor")
-app = FastAPI(title="NexusFlow Backend - Hardened Enterprise Edition")
+logger = logging.getLogger("eivanta.supervisor")
+app = FastAPI(title="Eivanta Backend - Hardened Enterprise Edition")
+try:
+    from backend import accounts
+    app.include_router(accounts.router)
+except ImportError as e:
+    logger.error(f"Failed to load accounts router: {e}")
 try:
     from backend.routers import swarm
     app.include_router(swarm.router)
@@ -76,20 +82,6 @@ class SearchRequest(BaseModel):
     session_id: Optional[str] = None
     sample_payload: Optional[Union[str, dict, list]] = None
 
-class DevLoginRequest(BaseModel):
-    # MINIMAL, TEMPORARY dev-login (added 2026-08-22). Issues a real,
-    # validly-signed JWT so the dashboard can exercise the ALREADY-REAL,
-    # unchanged verify_jwt_and_get_client_id() in backend/auth.py end to
-    # end. There is NO password check and NO user table -- this is not
-    # production authentication. Per founder decision, this exists only to
-    # unblock functional testing while full auth hardening (real
-    # signup/login, refresh tokens, secure cookie storage, rate limiting,
-    # etc.) is deliberately deferred until the platform is otherwise
-    # functional. This endpoint must be replaced, not just left in place,
-    # during that later hardening pass.
-    client_id: str = Field("CLI-001", min_length=1, max_length=128)
-
-
 class BISummaryRequest(BaseModel):
     # Optional ad hoc question for BI Engineer's NL-to-SQL capability
     # (SQL-01/SQL-03). Defaults to empty string, matching
@@ -99,7 +91,7 @@ class BISummaryRequest(BaseModel):
     # body (or send an empty query) see no behavior change and no added
     # cost versus before this field existed.
     query: str = Field("", max_length=2000)
-MAX_UPLOAD_BYTES = int(os.environ.get("NEXUSFLOW_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
+MAX_UPLOAD_BYTES = int(os.environ.get("EIVANTA_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
 @app.get("/api/v1/health")
 async def get_health():
     active_agents = get_active_agent_count()
@@ -109,28 +101,22 @@ async def get_health():
         "active_agent_modules": active_agents,
         "version": "2.2.1 (Hardened Production Architecture)"
     }
-@app.post("/api/v1/auth/dev-login")
-async def dev_login(req: DevLoginRequest = DevLoginRequest()):
-    import jwt as pyjwt
-    from datetime import datetime, timedelta, timezone
-    if not JWT_SECRET:
-        raise HTTPException(status_code=500, detail="Server authentication is not configured (JWT_SECRET unset).")
-    safe_client_id = sanitize_client_id(req.client_id)
-    logger.warning(
-        f"DEV LOGIN endpoint used to mint a token for client_id='{safe_client_id}'. "
-        "This endpoint performs NO password verification and must not exist in production."
-    )
-    now = datetime.now(timezone.utc)
-    payload = {"client_id": safe_client_id, "iat": now, "exp": now + timedelta(hours=12)}
-    token = pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-    return {"access_token": token, "token_type": "bearer", "client_id": safe_client_id}
+# RBAC-01: /api/v1/auth/dev-login is retired, not just deprecated -- its
+# own comment said it "must be replaced, not just left in place" during
+# the auth-hardening pass, and this is that pass. Real signup/login/team
+# management now live in backend/accounts.py (registered in the router
+# block above main.py's other routers). Anything still calling
+# dev-login (a stale frontend build, an old test fixture) gets a real
+# 404, not a silent security hole.
 @app.post("/api/finance/upload-ledger")
 async def upload_ledger(
     file: UploadFile = File(...),
-    client_id: str = Depends(verify_jwt_and_get_client_id),
+    # RBAC-01: mutates real tenant data (ingests rows) -- viewer excluded.
+    user: AuthenticatedUser = Depends(require_role("owner", "admin", "member")),
 ):
+    client_id = user.client_id
     safe_filename = Path(file.filename or "upload.csv").name
-    temp_dir = Path("/tmp/nexusflow_ingest")
+    temp_dir = Path("/tmp/eivanta_ingest")
     temp_dir.mkdir(parents=True, exist_ok=True)
     file_path = temp_dir / f"{client_id}_{safe_filename}"
     bytes_written = 0
@@ -178,11 +164,16 @@ async def get_ingestion_history_endpoint(
 
 
 @app.delete("/api/v1/finance/ledger")
-async def delete_ledger_endpoint(client_id: str = Depends(verify_jwt_and_get_client_id)):
+async def delete_ledger_endpoint(
+    # RBAC-01: destructive, irreversible, wipes ALL of this tenant's
+    # ledger data at once -- restricted to owner/admin, not member/viewer.
+    user: AuthenticatedUser = Depends(require_role("owner", "admin")),
+):
     # DATA-09: explicit deletion API for a tenant's own ledger data.
     # client_id comes ONLY from the verified JWT dependency above -- never
     # accepted as a request parameter -- so this can only ever delete the
     # caller's own tenant's data, never another tenant's.
+    client_id = user.client_id
     try:
         from backend.db_manager import delete_tenant_ledger
         deleted_count = await delete_tenant_ledger(client_id)
@@ -264,6 +255,111 @@ async def get_kpi_summary(client_id: str = Depends(verify_jwt_and_get_client_id)
     except Exception as e:
         logger.error(f"KPI Summary Error: {e}")
         raise HTTPException(status_code=502, detail="KPI summary generation failed. Please try again.")
+@app.post("/api/v1/finance/comptroller-audit")
+async def run_comptroller_audit(client_id: str = Depends(verify_jwt_and_get_client_id)):
+    """
+    Track 5 (Interactive audit trigger): real expense audit over this
+    tenant's own ledger -- category totals plus a genuine statistical
+    spike-anomaly check (z-score on transaction amount within each
+    category), not a canned/mocked response. Any category with fewer than
+    3 transactions is skipped for anomaly scoring (stdev is meaningless
+    below that), but its transactions still count toward the totals and
+    the audited count.
+    """
+    try:
+        from backend.db_manager import get_ledger_rows
+        ledger = await get_ledger_rows(client_id, limit=1000)
+        rows = ledger.get("rows", [])
+
+        by_category: dict[str, list[dict]] = {}
+        for row in rows:
+            cat = row.get("category") or "Uncategorized"
+            by_category.setdefault(cat, []).append(row)
+
+        expense_breakdown_by_category = {
+            cat: round(sum(r["amount"] for r in cat_rows), 2)
+            for cat, cat_rows in by_category.items()
+        }
+
+        ANOMALY_ZSCORE_THRESHOLD = 2.5
+        flagged_items = []
+        for cat, cat_rows in by_category.items():
+            if len(cat_rows) < 3:
+                continue
+            amounts = [r["amount"] for r in cat_rows]
+            mean = statistics.mean(amounts)
+            stdev = statistics.stdev(amounts)
+            if stdev == 0:
+                continue
+            for r in cat_rows:
+                z = (r["amount"] - mean) / stdev
+                if abs(z) >= ANOMALY_ZSCORE_THRESHOLD:
+                    flagged_items.append({
+                        "tx_id": str(r.get("row_id")) if r.get("row_id") is not None else f"{cat}:{r.get('date')}",
+                        "amount": r["amount"],
+                        "category": cat,
+                        "reason": f"{abs(z):.1f} std devs {'above' if z > 0 else 'below'} this category's average ({mean:,.2f}).",
+                    })
+
+        return {
+            "total_transactions_audited": len(rows),
+            "flagged_count": len(flagged_items),
+            "expense_breakdown_by_category": expense_breakdown_by_category,
+            "flagged_items": flagged_items,
+            "audit_status": "COMPLETE" if rows else "NO_DATA",
+        }
+    except Exception as e:
+        logger.error(f"Comptroller Audit Error: {e}")
+        raise HTTPException(status_code=502, detail="Ledger audit failed. Please try again.")
+class BYOKKeyRequest(BaseModel):
+    openai_api_key: str = Field(..., min_length=1)
+
+
+@app.get("/api/v1/settings/byok")
+async def get_byok_status(client_id: str = Depends(verify_jwt_and_get_client_id)):
+    """
+    Never returns the key itself, encrypted or otherwise -- only whether
+    one is configured. The key round-trips through backend/byok.py's
+    encrypt/decrypt exactly once: on save, and whenever an agent actually
+    needs it to call OpenAI.
+    """
+    try:
+        from backend.db_manager import get_tenant_byok_key_encrypted
+        encrypted = await get_tenant_byok_key_encrypted(client_id)
+        return {"byok_configured": bool(encrypted)}
+    except Exception as e:
+        logger.error(f"BYOK status check error: {e}")
+        raise HTTPException(status_code=502, detail="Could not check BYOK status.")
+
+
+@app.post("/api/v1/settings/byok")
+async def set_byok_key(req: BYOKKeyRequest, user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
+    try:
+        from backend.byok import encrypt_secret
+        from backend.db_manager import set_tenant_byok_key
+        encrypted = encrypt_secret(req.openai_api_key)
+        await set_tenant_byok_key(user.client_id, encrypted)
+        return {"byok_configured": True}
+    except RuntimeError as e:
+        # BYOK_ENCRYPTION_KEY missing/invalid, or `cryptography` not
+        # installed -- an operator/config problem, not a bad request from
+        # the tenant, so this is a 503 rather than a 400/422.
+        logger.error(f"BYOK save blocked by server configuration: {e}")
+        raise HTTPException(status_code=503, detail="BYOK is not configured on this server yet. Contact your administrator.")
+    except Exception as e:
+        logger.error(f"BYOK save error: {e}")
+        raise HTTPException(status_code=502, detail="Could not save your API key. Please try again.")
+
+
+@app.delete("/api/v1/settings/byok")
+async def delete_byok_key(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
+    try:
+        from backend.db_manager import set_tenant_byok_key
+        await set_tenant_byok_key(user.client_id, None)
+        return {"byok_configured": False}
+    except Exception as e:
+        logger.error(f"BYOK delete error: {e}")
+        raise HTTPException(status_code=502, detail="Could not remove your API key. Please try again.")
 @app.post("/api/v1/data/schema-audit")
 async def run_schema_audit(client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:

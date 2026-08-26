@@ -16,7 +16,7 @@ except ImportError:
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
 
-logger = logging.getLogger("nexusflow.saas_strategist")
+logger = logging.getLogger("eivanta.saas_strategist")
 
 
 # AI-03: previously no explicit request timeout at all. max_retries matches
@@ -215,7 +215,7 @@ def generate_strategy(client_id: str = "default_client") -> Dict[str, Any]:
     )
 
     system_prompt = f"""
-    You are Agent #10, NexusFlow's SaaS Strategist and Business Advisor.
+    You are Agent #10, Eivanta's SaaS Strategist and Business Advisor.
     Tenant: {safe_client_id}
     Real measured data -> Total revenue to date: ${metrics['total_revenue']:,.2f} across {metrics['total_rows']} ledger row(s). Top revenue categories: {top_cat_str}. Revenue trend: {trend_str}.
 

@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 from typing import Dict, Any
 
-logger = logging.getLogger("nexusflow.pipeline.bi_models")
+logger = logging.getLogger("eivanta.pipeline.bi_models")
 
 class BusinessIntelligenceModeler:
     """

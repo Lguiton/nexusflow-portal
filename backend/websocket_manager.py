@@ -4,7 +4,7 @@ from typing import Dict, Optional
  
 from fastapi import WebSocket
  
-logger = logging.getLogger("nexusflow.websocket_manager")
+logger = logging.getLogger("eivanta.websocket_manager")
  
  
 class SwarmConnectionManager:

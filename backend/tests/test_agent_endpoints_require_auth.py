@@ -10,7 +10,7 @@ pinning down here: the auth Depends() runs BEFORE the handler body reaches
 the agent call, so a request with no/invalid token is rejected with 401
 and never reaches OpenAI at all. If real end-to-end agent-output testing
 is wanted later, it belongs in a separate, explicitly-opt-in suite (e.g.
-gated behind an OPENAI_API_KEY / NEXUSFLOW_LIVE_LLM_TESTS env check) --
+gated behind an OPENAI_API_KEY / EIVANTA_LIVE_LLM_TESTS env check) --
 not bundled into the suite that runs on every `pytest` invocation.
 """
 import pytest

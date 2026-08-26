@@ -17,7 +17,7 @@ except ImportError:
 
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
-logger = logging.getLogger("nexusflow.bi_visualization_architect")
+logger = logging.getLogger("eivanta.bi_visualization_architect")
 
 # AI-03: previously no explicit request timeout at all. max_retries matches
 # the openai SDK's own default (2), made explicit here rather than left
@@ -157,9 +157,19 @@ async def generate_chart_suite(client_id: str = "default_client") -> Dict[str, A
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
 
     try:
-        from backend.db_manager import get_ledger_chart_context, get_amount_distribution
+        from backend.db_manager import (
+            get_ledger_chart_context,
+            get_amount_distribution,
+            get_category_monthly_breakdown,
+            get_category_amount_stats,
+        )
     except ImportError:
-        from db_manager import get_ledger_chart_context, get_amount_distribution
+        from db_manager import (
+            get_ledger_chart_context,
+            get_amount_distribution,
+            get_category_monthly_breakdown,
+            get_category_amount_stats,
+        )
 
     try:
         context = await get_ledger_chart_context(safe_client_id)
@@ -207,6 +217,35 @@ async def generate_chart_suite(client_id: str = "default_client") -> Dict[str, A
             "data": distribution["bins"],
         }
 
+    try:
+        monthly_breakdown = await get_category_monthly_breakdown(safe_client_id)
+    except Exception as e:
+        logger.error(f"BI Visualization Architect: failed to compute category/monthly breakdown for {safe_client_id}: {e}")
+        monthly_breakdown = {"months": [], "categories": [], "data": []}
+
+    # A "stack" of one category isn't meaningfully stacked, and a single
+    # month has nothing to compare across -- same >=2-months discipline as
+    # monthly_trend above, plus a >1-category floor.
+    if len(monthly_breakdown.get("months", [])) >= 2 and len(monthly_breakdown.get("categories", [])) > 1:
+        charts["category_monthly_breakdown"] = {
+            "chart_type": "stacked_bar",
+            "config": {"xAxisKey": "month", "dataKeys": monthly_breakdown["categories"]},
+            "data": monthly_breakdown["data"],
+        }
+
+    try:
+        amount_stats = await get_category_amount_stats(safe_client_id)
+    except Exception as e:
+        logger.error(f"BI Visualization Architect: failed to compute category amount stats for {safe_client_id}: {e}")
+        amount_stats = {"stats": []}
+
+    if amount_stats.get("stats"):
+        charts["category_amount_stats"] = {
+            "chart_type": "box_plot",
+            "config": {"xAxisKey": "category", "dataKeys": ["min", "q1", "median", "q3", "max"]},
+            "data": amount_stats["stats"],
+        }
+
     insights = [
         f"{context.get('row_count', 0)} real ledger record(s) across "
         f"{len(category_breakdown)} categor{'y' if len(category_breakdown) == 1 else 'ies'}."
@@ -222,6 +261,17 @@ async def generate_chart_suite(client_id: str = "default_client") -> Dict[str, A
     if distribution.get("bins"):
         insights.append(
             f"Transaction amounts grouped into {len(distribution['bins'])} real bins from this tenant's actual ledger."
+        )
+    if "category_monthly_breakdown" in charts:
+        insights.append(
+            f"Category-by-month breakdown spans {len(monthly_breakdown['categories'])} categor"
+            f"{'y' if len(monthly_breakdown['categories']) == 1 else 'ies'} across "
+            f"{len(monthly_breakdown['months'])} months."
+        )
+    if "category_amount_stats" in charts:
+        insights.append(
+            f"Transaction-amount spread computed per category ({len(amount_stats['stats'])} categor"
+            f"{'y' if len(amount_stats['stats']) == 1 else 'ies'}) from this tenant's real ledger rows."
         )
 
     return {

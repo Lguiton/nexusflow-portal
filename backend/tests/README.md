@@ -1,11 +1,11 @@
-# NexusFlow backend test suite
+# Eivanta backend test suite
 
 Real pytest tests against the actual backend code (not the stub-based
 harness from an earlier session, which lived only in that session's
 now-gone cloud sandbox and was never migrated here). Every test in this
 suite either hits the real FastAPI app via `TestClient` or calls into
 `db_manager.py` directly against an isolated, per-test DuckDB file — never
-your real `backend/nexusflow.duckdb`.
+your real `backend/eivanta.duckdb`.
 
 ## Setup
 
@@ -19,7 +19,7 @@ pip install pytest pytest-asyncio
 
 ## Running
 
-From the `nexusflow-portal` project root, or from `backend/` — both work,
+From the `eivanta-portal` project root, or from `backend/` — both work,
 `tests/conftest.py` adds the project root to `sys.path` itself regardless
 of current directory:
 

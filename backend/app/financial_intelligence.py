@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, Any, List
 
-logger = logging.getLogger("NexusFlow-FinancialIntelligence")
+logger = logging.getLogger("Eivanta-FinancialIntelligence")
 
 class VirtualCFOAgent:
     """

@@ -11,4 +11,7 @@ python-dotenv
 pydantic
 httpx
 python-multipart
- 
+bcrypt
+stripe
+resend
+cryptography

@@ -25,12 +25,18 @@ function renderWithProvider(ui: React.ReactElement) {
   return render(<ClientProvider>{ui}</ClientProvider>);
 }
 
-function mockDevLogin(ok: boolean) {
+const REAL_USER = { user_id: 1, client_id: 'CLI-001', email: 'owner@test.example', role: 'owner' };
+
+// RBAC-01: ClientContext only auto-authenticates via an ALREADY-STORED
+// token (validated against /api/v1/auth/me), unlike the old dev-login
+// flow this used to mock, which authenticated on every mount regardless.
+// `ok` controls whether that stored token validates.
+function mockSessionRestore(ok: boolean) {
   (global.fetch as jest.Mock).mockImplementation((url: string) => {
-    if (url.includes('/api/v1/auth/dev-login')) {
+    if (url.includes('/api/v1/auth/me')) {
       return ok
-        ? Promise.resolve({ ok: true, json: async () => ({ access_token: 'test-token', client_id: 'CLI-001' }) })
-        : Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
+        ? Promise.resolve({ ok: true, json: async () => REAL_USER })
+        : Promise.resolve({ ok: false, status: 401, json: async () => ({}) });
     }
     return Promise.reject(new Error(`Unexpected fetch to ${url}`));
   });
@@ -40,6 +46,7 @@ beforeEach(() => {
   global.fetch = jest.fn();
   MockWebSocket.instances = [];
   (global as any).WebSocket = MockWebSocket;
+  window.sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -47,21 +54,28 @@ afterEach(() => {
 });
 
 describe('SwarmLogStreamer', () => {
-  it('shows a Retry Authentication button (not the old dead dev-token flow) when auth fails, and it re-triggers login', async () => {
-    mockDevLogin(false);
+  it('shows a Retry Authentication button when signed out, and retryLogin() re-checks for a session', async () => {
+    // No stored token at all -- ClientContext settles straight to
+    // signed-out (authReady=true, authToken=null) with no fetch call,
+    // which this widget correctly renders as "Authentication Failed".
     renderWithProvider(<SwarmLogStreamer />);
 
     await waitFor(() => expect(screen.getByText('Authentication Failed')).toBeInTheDocument());
     expect(screen.getByText('Unable to authenticate the telemetry stream.')).toBeInTheDocument();
 
-    mockDevLogin(true);
+    // Simulate a session having appeared out-of-band (e.g. the user just
+    // signed in via AuthGate elsewhere in the app) and confirm the Retry
+    // button's retryLogin() call picks it up.
+    window.sessionStorage.setItem('nexus_access_token', 'test-token');
+    mockSessionRestore(true);
     fireEvent.click(screen.getByText('Retry Authentication'));
 
     await waitFor(() => expect(screen.getByText(/Verified Tenant|Connecting/)).toBeInTheDocument());
   });
 
   it('connects over the correct two-segment WS route with a token, and shows Verified Tenant once open', async () => {
-    mockDevLogin(true);
+    window.sessionStorage.setItem('nexus_access_token', 'test-token');
+    mockSessionRestore(true);
     renderWithProvider(<SwarmLogStreamer sessionId="test-session" />);
 
     await waitFor(() => expect(MockWebSocket.instances.length).toBe(1));
@@ -77,7 +91,8 @@ describe('SwarmLogStreamer', () => {
   });
 
   it('renders an incoming telemetry message', async () => {
-    mockDevLogin(true);
+    window.sessionStorage.setItem('nexus_access_token', 'test-token');
+    mockSessionRestore(true);
     renderWithProvider(<SwarmLogStreamer sessionId="test-session" />);
 
     await waitFor(() => expect(MockWebSocket.instances.length).toBe(1));
@@ -93,7 +108,8 @@ describe('SwarmLogStreamer', () => {
   });
 
   it('treats WS close code 4008 as an auth failure, not a silent retry loop', async () => {
-    mockDevLogin(true);
+    window.sessionStorage.setItem('nexus_access_token', 'test-token');
+    mockSessionRestore(true);
     renderWithProvider(<SwarmLogStreamer sessionId="test-session" />);
 
     await waitFor(() => expect(MockWebSocket.instances.length).toBe(1));

@@ -5,23 +5,41 @@ import { BarChart3, RefreshCw, Loader2, AlertCircle, Sparkles } from 'lucide-rea
 import { useClientId } from "./ClientContext";
 import DynamicChartEngine from "./DynamicChartEngine";
 import CategoryChartPicker from "./CategoryChartPicker";
+import MonthlyTrendPicker from "./MonthlyTrendPicker";
 
 // Real replacement for the deleted MRRChartWidget.tsx (which was 100%
 // hardcoded mock pie/bar data under an "MRR" label) -- this widget fetches
 // the real /api/v1/bi/chart-suite endpoint (backed by
 // bi_visualization_architect.generate_chart_suite, grounded entirely in
 // this tenant's actual ledger data via db_manager) and renders whichever
-// of the three real charts that endpoint returns:
-//   - category_breakdown: pie or pareto, from real category totals
-//   - monthly_trend: a real line chart of monthly revenue (only present
-//     once 2+ distinct months are on file)
-//   - amount_distribution: a real transaction-amount histogram (new
-//     backend capability -- see db_manager.get_amount_distribution)
+// of the charts that endpoint returns:
+//   - category_breakdown: pie/pareto (recommended) from real category
+//     totals, with a picker for bar/pie/donut/pareto/stacked/box
+//   - monthly_trend: real monthly revenue (only present once 2+ distinct
+//     months are on file), with a line/area picker
+//   - amount_distribution: a real transaction-amount histogram
+//   - category_monthly_breakdown: real category totals broken out by
+//     month -- not rendered as its own tile, folded into the category
+//     picker's "Stacked" view (same category dimension as
+//     category_breakdown, just a second real dataset backing one more
+//     way to look at it)
+//   - category_amount_stats: real per-category min/Q1/median/Q3/max --
+//     likewise folded into the category picker's "Box Plot" view instead
+//     of a separate tile
 // Each panel is rendered only if the backend actually included it; there
 // is no client-side fallback data of any kind.
 
 interface ChartSection {
   chart_type: 'bar' | 'pie' | 'stacked_bar' | 'pareto' | 'line' | 'histogram';
+  config: { xAxisKey: string; dataKeys: string[] };
+  data: any[];
+}
+
+// The two category-picker-only sections never reach DynamicChartEngine (see
+// FOLDED_INTO_CATEGORY_PICKER below), so they don't need a chart_type at
+// all -- CategoryChartPicker's own stackedSection/boxSection props only
+// look at config/data.
+interface ChartSectionLike {
   config: { xAxisKey: string; dataKeys: string[] };
   data: any[];
 }
@@ -33,6 +51,8 @@ interface ChartSuitePayload {
     category_breakdown?: ChartSection;
     monthly_trend?: ChartSection;
     amount_distribution?: ChartSection;
+    category_monthly_breakdown?: ChartSectionLike;
+    category_amount_stats?: ChartSectionLike;
   };
   insights: string[];
 }
@@ -46,6 +66,11 @@ const PANEL_TITLES: Record<string, string> = {
   monthly_trend: "Monthly Revenue Trend",
   amount_distribution: "Transaction Amount Distribution",
 };
+
+// These two keys are real chart-suite sections, but they're rendered as
+// extra VIEWS inside the category_breakdown tile (via CategoryChartPicker)
+// rather than as their own separate tiles -- see the module comment above.
+const FOLDED_INTO_CATEGORY_PICKER = new Set(["category_monthly_breakdown", "category_amount_stats"]);
 
 export default function DataVisualizationWidget({ refreshTrigger = 0 }: DataVisualizationWidgetProps) {
   const clientCtx = useClientId() as any;
@@ -98,7 +123,11 @@ export default function DataVisualizationWidget({ refreshTrigger = 0 }: DataVisu
 
   const chartEntries = data
     ? (Object.entries(data.charts || {}) as Array<[string, ChartSection]>)
+        .filter(([key]) => !FOLDED_INTO_CATEGORY_PICKER.has(key))
     : [];
+
+  const stackedSection = data?.charts?.category_monthly_breakdown ?? null;
+  const boxSection = data?.charts?.category_amount_stats ?? null;
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg flex flex-col">
@@ -111,7 +140,7 @@ export default function DataVisualizationWidget({ refreshTrigger = 0 }: DataVisu
             <h2 className="text-lg font-bold text-white flex items-center gap-2">
               Data Visualization Suite (Agent #0?)
             </h2>
-            <p className="text-xs text-slate-400">Real pie, line, and histogram charts grounded in this tenant's actual ledger data</p>
+            <p className="text-xs text-slate-400">Real charts grounded in this tenant's actual ledger data</p>
           </div>
         </div>
 
@@ -155,12 +184,20 @@ export default function DataVisualizationWidget({ refreshTrigger = 0 }: DataVisu
                     {PANEL_TITLES[key] || key}
                   </h3>
                   {key === "category_breakdown" ? (
-                    // Real category totals, same dataset -- but this is
-                    // the one panel where letting the user pick how to
-                    // read it (bar / pie / pareto) actually adds value,
-                    // so it gets the chart-type picker instead of the
-                    // fixed renderer the backend recommended.
-                    <CategoryChartPicker data={section.data} config={section.config} />
+                    // Real category totals, plus two more real datasets
+                    // (stacked-by-month, per-category spread) folded into
+                    // the same picker -- see FOLDED_INTO_CATEGORY_PICKER
+                    // above for why those aren't separate tiles.
+                    <CategoryChartPicker
+                      data={section.data}
+                      config={section.config}
+                      stackedSection={stackedSection}
+                      boxSection={boxSection}
+                    />
+                  ) : key === "monthly_trend" ? (
+                    // Same real single-series monthly data, with a
+                    // line/area toggle instead of the fixed line render.
+                    <MonthlyTrendPicker data={section.data} config={section.config} />
                   ) : (
                     <DynamicChartEngine
                       chartType={section.chart_type}

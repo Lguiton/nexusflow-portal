@@ -7,8 +7,8 @@ from datetime import date
 from typing import Optional
 import duckdb
 import pandas as pd
-logger = logging.getLogger("nexusflow.db_manager")
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nexusflow.duckdb")
+logger = logging.getLogger("eivanta.db_manager")
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eivanta.duckdb")
 
 # FIXED (real production crash + a masked-failure bug, both confirmed
 # live): this used to be a lazily-created asyncio.Lock(). asyncio.Lock is
@@ -120,9 +120,423 @@ async def init_db():
                     # skipped then; new rows get their row_id from
                     # ingest_csv_to_db's own INSERT instead).
                     conn.execute("UPDATE ledgers SET row_id = nextval('ledger_row_id_seq') WHERE row_id IS NULL")
+
+                # RBAC-01: real accounts. Until now there was no users
+                # table at all -- /api/v1/auth/dev-login minted a validly
+                # signed JWT for ANY client_id string with zero password
+                # check (see its own comment in main.py). tenants is the
+                # authoritative registry of client_id (previously just a
+                # loose string scattered across every other table with no
+                # central record) and now also carries billing state;
+                # users holds real per-person accounts, one row per
+                # teammate, each with its own bcrypt password hash and a
+                # role scoped to their tenant. Same idempotent
+                # CREATE-IF-NOT-EXISTS shape as every other migration in
+                # this function.
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS tenants (
+                        client_id VARCHAR PRIMARY KEY,
+                        company_name VARCHAR,
+                        stripe_customer_id VARCHAR,
+                        stripe_subscription_id VARCHAR,
+                        subscription_status VARCHAR DEFAULT 'inactive',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                # BYOK-01: Bring Your Own Key -- lets a tenant supply their
+                # own OpenAI API key instead of drawing on the platform's.
+                # Stored encrypted at rest (Fernet, see backend/byok.py) --
+                # this column NEVER holds a plaintext key. Same idempotent
+                # migration shape as the ledgers migrations above.
+                try:
+                    tenant_cols = {row[1] for row in conn.execute("PRAGMA table_info('tenants')").fetchall()}
+                except Exception as e:
+                    logger.warning(f"Could not introspect tenants table columns before BYOK-01 migration check: {e}")
+                    tenant_cols = set()
+                if "byok_openai_key_encrypted" not in tenant_cols:
+                    try:
+                        conn.execute("ALTER TABLE tenants ADD COLUMN byok_openai_key_encrypted VARCHAR")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                conn.execute("CREATE SEQUENCE IF NOT EXISTS user_id_seq")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT DEFAULT nextval('user_id_seq'),
+                        client_id VARCHAR NOT NULL,
+                        email VARCHAR NOT NULL,
+                        password_hash VARCHAR NOT NULL,
+                        role VARCHAR NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_login_at TIMESTAMP
+                    )
+                """)
+                # Case-insensitive uniqueness is enforced in Python (every
+                # write/lookup lower()s the email first -- see
+                # get_user_by_email/create_tenant_and_owner/
+                # create_invited_user below) rather than a SQL functional
+                # index, to match how every other query in this file
+                # already treats DuckDB as the storage layer, not the
+                # place business rules live. This plain unique index is
+                # still a real DB-level backstop against two rows for the
+                # literal same stored (already-lowercased) email string.
+                try:
+                    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users(email)")
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        raise
             finally:
                 conn.close()
     await asyncio.to_thread(_init)
+
+
+# ---------------------------------------------------------------------------
+# RBAC-01: account management -- tenants + users
+#
+# Role model (per-tenant, one row per person in `users`):
+#   owner  -- exactly one per tenant in practice (the signup creator);
+#             full control including billing and removing/promoting anyone.
+#   admin  -- manage teammates and settings, cannot touch billing.
+#   member -- normal product use, no admin actions.
+#   viewer -- read-only.
+# Enforcement itself lives in backend/auth.py's require_role() dependency,
+# used by whichever router owns each endpoint -- this module only stores
+# and retrieves the data, same separation every other feature in this
+# file already follows (db_manager never imports FastAPI).
+# ---------------------------------------------------------------------------
+
+VALID_ROLES = ("owner", "admin", "member", "viewer")
+
+
+class DuplicateEmailError(Exception):
+    """Raised when a signup/invite email is already registered for any tenant."""
+
+
+class TenantExistsError(Exception):
+    """Raised when signup targets a client_id that's already registered."""
+
+
+async def create_tenant_and_owner(client_id: str, company_name: str, email: str, password_hash: str) -> dict:
+    """
+    Real signup: creates the tenant registry row AND its first user in one
+    transaction, that user always role='owner'. Rolls back entirely (no
+    orphaned tenant-with-no-owner, no orphaned user-with-no-tenant) if
+    either half fails -- confirmed via explicit BEGIN/COMMIT/ROLLBACK
+    rather than relying on DuckDB's own statement-level atomicity across
+    two separate INSERTs.
+    """
+    await init_db()
+    lock = get_db_lock()
+    email_norm = email.strip().lower()
+
+    def _create():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                existing_tenant = conn.execute(
+                    "SELECT 1 FROM tenants WHERE client_id = ?", [client_id]
+                ).fetchone()
+                if existing_tenant:
+                    raise TenantExistsError(f"client_id '{client_id}' is already registered.")
+                existing_email = conn.execute(
+                    "SELECT 1 FROM users WHERE email = ?", [email_norm]
+                ).fetchone()
+                if existing_email:
+                    raise DuplicateEmailError(f"'{email_norm}' is already registered.")
+
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    conn.execute(
+                        "INSERT INTO tenants (client_id, company_name) VALUES (?, ?)",
+                        [client_id, company_name],
+                    )
+                    conn.execute(
+                        "INSERT INTO users (client_id, email, password_hash, role) VALUES (?, ?, ?, 'owner')",
+                        [client_id, email_norm, password_hash],
+                    )
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+                row = conn.execute(
+                    "SELECT user_id, client_id, email, role FROM users WHERE email = ?", [email_norm]
+                ).fetchone()
+                return {"user_id": row[0], "client_id": row[1], "email": row[2], "role": row[3]}
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_create)
+
+
+async def create_invited_user(client_id: str, email: str, password_hash: str, role: str) -> dict:
+    """
+    Adds a teammate to an EXISTING tenant. Caller (the accounts router) is
+    responsible for checking the inviting user's own role is owner/admin
+    before this is ever called -- this function itself only enforces the
+    data-integrity rules that don't depend on who's asking: the tenant
+    must already exist, the role must be one of the four real roles, and
+    the email must not already be registered anywhere (a person has one
+    account across the whole system, not one per tenant they're invited
+    to -- simplest real model for a v1, revisit if multi-tenant membership
+    for one person is ever actually needed).
+    """
+    if role not in VALID_ROLES:
+        raise ValueError(f"role must be one of {VALID_ROLES}, got {role!r}")
+    await init_db()
+    lock = get_db_lock()
+    email_norm = email.strip().lower()
+
+    def _create():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                existing_tenant = conn.execute(
+                    "SELECT 1 FROM tenants WHERE client_id = ?", [client_id]
+                ).fetchone()
+                if not existing_tenant:
+                    raise TenantExistsError(f"client_id '{client_id}' is not a registered tenant.")
+                existing_email = conn.execute(
+                    "SELECT 1 FROM users WHERE email = ?", [email_norm]
+                ).fetchone()
+                if existing_email:
+                    raise DuplicateEmailError(f"'{email_norm}' is already registered.")
+                conn.execute(
+                    "INSERT INTO users (client_id, email, password_hash, role) VALUES (?, ?, ?, ?)",
+                    [client_id, email_norm, password_hash, role],
+                )
+                row = conn.execute(
+                    "SELECT user_id, client_id, email, role FROM users WHERE email = ?", [email_norm]
+                ).fetchone()
+                return {"user_id": row[0], "client_id": row[1], "email": row[2], "role": row[3]}
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_create)
+
+
+async def get_user_by_email(email: str) -> Optional[dict]:
+    """Real lookup for login -- returns the password_hash too (caller verifies it), or None."""
+    await init_db()
+    lock = get_db_lock()
+    email_norm = email.strip().lower()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT user_id, client_id, email, password_hash, role FROM users WHERE email = ?",
+                    [email_norm],
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "user_id": row[0], "client_id": row[1], "email": row[2],
+                    "password_hash": row[3], "role": row[4],
+                }
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def update_last_login(user_id: int) -> None:
+    lock = get_db_lock()
+
+    def _update():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE user_id = ?", [user_id]
+                )
+            finally:
+                conn.close()
+    await asyncio.to_thread(_update)
+
+
+async def list_users_for_tenant(client_id: str) -> list[dict]:
+    lock = get_db_lock()
+
+    def _list():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                rows = conn.execute(
+                    "SELECT user_id, email, role, created_at, last_login_at FROM users "
+                    "WHERE client_id = ? ORDER BY created_at ASC",
+                    [client_id],
+                ).fetchall()
+                return [
+                    {
+                        "user_id": r[0], "email": r[1], "role": r[2],
+                        "created_at": str(r[3]) if r[3] is not None else None,
+                        "last_login_at": str(r[4]) if r[4] is not None else None,
+                    }
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_list)
+
+
+async def update_user_role(client_id: str, user_id: int, new_role: str) -> bool:
+    """Returns False if no matching user was found for that tenant (never touches another tenant's user)."""
+    if new_role not in VALID_ROLES:
+        raise ValueError(f"role must be one of {VALID_ROLES}, got {new_role!r}")
+    lock = get_db_lock()
+
+    def _update():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                # RBAC-01 fix: this used to check `SELECT changes()` after
+                # the UPDATE to see whether a row was actually touched --
+                # that's a SQLite-ism. DuckDB has no changes() scalar
+                # function, so that call raised a Catalog/Binder error on
+                # every real invocation, meaning this endpoint 500'd
+                # instead of ever returning True/False. Existence-check
+                # first instead, matching this file's own established
+                # pattern elsewhere (see delete_tenant_ledger's SELECT
+                # COUNT(*)-before-DELETE above).
+                exists = conn.execute(
+                    "SELECT 1 FROM users WHERE user_id = ? AND client_id = ?",
+                    [user_id, client_id],
+                ).fetchone()
+                if not exists:
+                    return False
+                conn.execute(
+                    "UPDATE users SET role = ? WHERE user_id = ? AND client_id = ?",
+                    [new_role, user_id, client_id],
+                )
+                return True
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_update)
+
+
+async def remove_user(client_id: str, user_id: int) -> bool:
+    """Returns False if no matching user was found for that tenant (never touches another tenant's user)."""
+    lock = get_db_lock()
+
+    def _remove():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                # RBAC-01 fix: same SELECT changes() bug as
+                # update_user_role above -- not a real DuckDB function,
+                # existence-check first instead.
+                exists = conn.execute(
+                    "SELECT 1 FROM users WHERE user_id = ? AND client_id = ?",
+                    [user_id, client_id],
+                ).fetchone()
+                if not exists:
+                    return False
+                conn.execute(
+                    "DELETE FROM users WHERE user_id = ? AND client_id = ?", [user_id, client_id]
+                )
+                return True
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_remove)
+
+
+async def get_tenant(client_id: str) -> Optional[dict]:
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT client_id, company_name, stripe_customer_id, stripe_subscription_id, "
+                    "subscription_status, created_at FROM tenants WHERE client_id = ?",
+                    [client_id],
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "client_id": row[0], "company_name": row[1],
+                    "stripe_customer_id": row[2], "stripe_subscription_id": row[3],
+                    "subscription_status": row[4], "created_at": str(row[5]) if row[5] is not None else None,
+                }
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def update_tenant_billing(
+    client_id: str,
+    stripe_customer_id: Optional[str] = None,
+    stripe_subscription_id: Optional[str] = None,
+    subscription_status: Optional[str] = None,
+) -> None:
+    """
+    Partial update -- only overwrites fields actually passed. Used both
+    right after Stripe Checkout creates a customer (stripe_customer_id
+    only, subscription not active yet) and from the webhook handler once
+    the subscription itself changes state (see backend/billing.py).
+    """
+    lock = get_db_lock()
+
+    def _update():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                sets, params = [], []
+                if stripe_customer_id is not None:
+                    sets.append("stripe_customer_id = ?")
+                    params.append(stripe_customer_id)
+                if stripe_subscription_id is not None:
+                    sets.append("stripe_subscription_id = ?")
+                    params.append(stripe_subscription_id)
+                if subscription_status is not None:
+                    sets.append("subscription_status = ?")
+                    params.append(subscription_status)
+                if not sets:
+                    return
+                params.append(client_id)
+                conn.execute(f"UPDATE tenants SET {', '.join(sets)} WHERE client_id = ?", params)
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_update)
+
+
+# BYOK-01 -- storage only. These functions read/write the encrypted column
+# verbatim; encryption/decryption itself lives in backend/byok.py, which is
+# the only module that should ever handle a plaintext key. Never log or
+# return the encrypted value to a frontend caller -- see main.py's BYOK
+# endpoints, which only ever return whether a key is set, never the value.
+
+async def set_tenant_byok_key(client_id: str, encrypted_key: Optional[str]) -> None:
+    lock = get_db_lock()
+
+    def _update():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "UPDATE tenants SET byok_openai_key_encrypted = ? WHERE client_id = ?",
+                    [encrypted_key, client_id],
+                )
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_update)
+
+
+async def get_tenant_byok_key_encrypted(client_id: str) -> Optional[str]:
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT byok_openai_key_encrypted FROM tenants WHERE client_id = ?",
+                    [client_id],
+                ).fetchone()
+                return row[0] if row else None
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
 def _parse_amount_series(series: pd.Series) -> pd.Series:
     text = series.astype(str).str.strip()
     text = text.str.replace(r'^\((.*)\)$', r'-\1', regex=True)
@@ -606,6 +1020,131 @@ async def get_amount_distribution(client_id: str, bin_count: int = 8) -> dict:
             finally:
                 conn.close()
     return await asyncio.to_thread(_query)
+
+
+async def get_category_monthly_breakdown(client_id: str) -> dict:
+    """
+    Real category-totals-by-month breakdown -- powers the "stacked bar"
+    view of monthly revenue split by category. Added specifically because
+    the existing category_breakdown data (total_amount + entry_count per
+    category) has no second field in the SAME unit to legitimately stack
+    against total_amount -- dollars and a row count aren't comparable on
+    one axis. This instead pivots real per-row (category, month, amount)
+    data into one real dollar total per category per month, so every
+    stacked segment is directly comparable to every other.
+    Same lock/thread-offload/tenant-scoping discipline as
+    get_ledger_chart_context above.
+    """
+    if not client_id:
+        raise ValueError("client_id is required.")
+    lock = get_db_lock()
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                rows = conn.execute("""
+                    SELECT
+                        strftime(TRY_CAST(date AS DATE), '%Y-%m') as month,
+                        category,
+                        ROUND(SUM(amount), 2) as total_amount
+                    FROM ledgers
+                    WHERE client_id = ? AND TRY_CAST(date AS DATE) IS NOT NULL
+                    GROUP BY month, category
+                    ORDER BY month, category
+                """, [client_id]).fetchall()
+
+                if not rows:
+                    return {"months": [], "categories": [], "data": []}
+
+                months_seen = []
+                categories_seen = []
+                pivot = {}
+                for month, category, total_amount in rows:
+                    if month not in pivot:
+                        pivot[month] = {}
+                        months_seen.append(month)
+                    if category not in categories_seen:
+                        categories_seen.append(category)
+                    pivot[month][category] = float(total_amount)
+
+                data = []
+                for month in months_seen:
+                    record = {"month": month}
+                    for category in categories_seen:
+                        # 0.0 for a category/month pair with no real rows --
+                        # a genuine zero, not a fabricated estimate.
+                        record[category] = pivot[month].get(category, 0.0)
+                    data.append(record)
+
+                return {
+                    "months": months_seen,
+                    "categories": categories_seen,
+                    "data": data,
+                }
+            except Exception as e:
+                logger.error(f"Failed to build category/monthly breakdown for tenant '{client_id}': {e}")
+                raise
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
+async def get_category_amount_stats(client_id: str) -> dict:
+    """
+    Real five-number summary (min / Q1 / median / Q3 / max) of transaction
+    amounts per category -- powers the "box plot" view. Computed directly
+    via DuckDB's PERCENTILE_CONT/MEDIAN aggregates against this tenant's
+    actual ledger rows, not estimated or invented. Whiskers are the
+    category's real min/max (no IQR-fence outlier exclusion), so a lone
+    extreme transaction shows up honestly as the whisker tip rather than
+    being quietly dropped from the picture.
+    Same lock/thread-offload/tenant-scoping discipline as
+    get_ledger_chart_context above.
+    """
+    if not client_id:
+        raise ValueError("client_id is required.")
+    lock = get_db_lock()
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                rows = conn.execute("""
+                    SELECT
+                        category,
+                        MIN(amount) as min_amount,
+                        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY amount) as q1,
+                        MEDIAN(amount) as median_amount,
+                        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY amount) as q3,
+                        MAX(amount) as max_amount,
+                        COUNT(*) as entry_count
+                    FROM ledgers
+                    WHERE client_id = ? AND amount IS NOT NULL
+                    GROUP BY category
+                    ORDER BY category
+                """, [client_id]).fetchall()
+
+                return {
+                    "stats": [
+                        {
+                            "category": r[0],
+                            "min": round(float(r[1]), 2),
+                            "q1": round(float(r[2]), 2),
+                            "median": round(float(r[3]), 2),
+                            "q3": round(float(r[4]), 2),
+                            "max": round(float(r[5]), 2),
+                            "entry_count": int(r[6]),
+                        }
+                        for r in rows
+                    ]
+                }
+            except Exception as e:
+                logger.error(f"Failed to build category amount stats for tenant '{client_id}': {e}")
+                raise
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
 _SEED_ROWS = [
     ("orchestrator", "COMPLETE", 1.2),
     ("virtual_cfo", "COMPLETE", 2.1),
@@ -1335,7 +1874,7 @@ async def get_forecast_accuracy(client_id: str) -> dict:
     return await asyncio.to_thread(_query)
 
 
-async def get_ledger_rows(client_id: str, category: str = None, month: str = None, limit: int = 200) -> dict:
+async def get_ledger_rows(client_id: str, category: str = None, month: str = None, limit: int = 200, date_from: str = None, date_to: str = None) -> dict:
     """
     DIFF-01: real row-level drill-down -- returns the actual ledger rows
     (including each row's real row_id) behind an optional category/month
@@ -1347,6 +1886,12 @@ async def get_ledger_rows(client_id: str, category: str = None, month: str = Non
     is used regardless of which filters are active, rather than building
     different SQL text per combination -- simpler to reason about and to
     test than four distinct query shapes.
+
+    date_from/date_to (Track 5 global time-range selector): an inclusive
+    real date-range filter, independent of and combinable with the exact
+    "month" match above (both can be applied at once, though callers
+    normally use one or the other). Both bounds are optional -- either one
+    alone still filters correctly via the same NULL-safe pattern.
 
     legacy_row_count in the response counts returned rows with no row_id
     (row_id IS NULL) -- rows that existed before the DIFF-01 migration ran
@@ -1369,9 +1914,11 @@ async def get_ledger_rows(client_id: str, category: str = None, month: str = Non
                     WHERE client_id = ?
                       AND (? IS NULL OR category = ?)
                       AND (? IS NULL OR strftime(TRY_CAST(date AS DATE), '%Y-%m') = ?)
+                      AND (? IS NULL OR TRY_CAST(date AS DATE) >= TRY_CAST(? AS DATE))
+                      AND (? IS NULL OR TRY_CAST(date AS DATE) <= TRY_CAST(? AS DATE))
                     ORDER BY TRY_CAST(date AS DATE) DESC
                     LIMIT ?
-                """, [client_id, category, category, month, month, limit]).fetchall()
+                """, [client_id, category, category, month, month, date_from, date_from, date_to, date_to, limit]).fetchall()
                 result_rows = [
                     {
                         "row_id": r[0],
@@ -1385,7 +1932,7 @@ async def get_ledger_rows(client_id: str, category: str = None, month: str = Non
                 ]
                 return {
                     "client_id": client_id,
-                    "filter": {"category": category, "month": month},
+                    "filter": {"category": category, "month": month, "date_from": date_from, "date_to": date_to},
                     "row_count": len(result_rows),
                     "legacy_row_count": sum(1 for r in result_rows if r["row_id"] is None),
                     "rows": result_rows,

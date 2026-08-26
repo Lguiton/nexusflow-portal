@@ -17,20 +17,76 @@ def test_health_endpoint(client):
     assert body["status"] == "ONLINE"
 
 
-def test_dev_login_issues_real_jwt(client):
+def test_dev_login_is_gone(client):
+    # RBAC-01: the endpoint itself said "must be replaced, not just left
+    # in place" -- this pins down that it's actually gone, not just
+    # undocumented, so a regression that accidentally reintroduces it
+    # (e.g. a bad merge) gets caught here.
     resp = client.post("/api/v1/auth/dev-login", json={"client_id": "CLI-042"})
+    assert resp.status_code == 404
+
+
+def test_signup_issues_real_jwt_and_creates_owner(client):
+    resp = client.post("/api/v1/auth/signup", json={
+        "company_name": "Acme Test Co",
+        "email": "owner@acmetest.example",
+        "password": "correct-horse-battery-staple",
+    })
     assert resp.status_code == 200
     body = resp.json()
-    assert body["client_id"] == "CLI-042"
     assert body["token_type"] == "bearer"
+    assert body["role"] == "owner"
+    assert body["email"] == "owner@acmetest.example"
     assert isinstance(body["access_token"], str) and len(body["access_token"]) > 20
+    # client_id is derived from company_name (sanitize_client_id's
+    # [A-Za-z0-9_-] alphabet), not user-supplied directly.
+    assert body["client_id"].startswith("ACME-TEST-CO-")
 
 
-def test_dev_login_sanitizes_client_id(client):
-    resp = client.post("/api/v1/auth/dev-login", json={"client_id": "CLI 001!!!<script>"})
+def test_signup_rejects_duplicate_email(client):
+    payload = {"company_name": "Dup Co", "email": "dup@test.example", "password": "correct-horse-battery-staple"}
+    first = client.post("/api/v1/auth/signup", json=payload)
+    assert first.status_code == 200
+    second = client.post("/api/v1/auth/signup", json={**payload, "company_name": "Dup Co Two"})
+    assert second.status_code == 409
+
+
+def test_signup_rejects_short_password(client):
+    resp = client.post("/api/v1/auth/signup", json={
+        "company_name": "Weak Pw Co", "email": "weak@test.example", "password": "short",
+    })
+    assert resp.status_code == 422
+
+
+def test_login_round_trip(client):
+    signup = client.post("/api/v1/auth/signup", json={
+        "company_name": "Login Test Co", "email": "logintest@test.example", "password": "correct-horse-battery-staple",
+    })
+    assert signup.status_code == 200
+    resp = client.post("/api/v1/auth/login", json={
+        "email": "logintest@test.example", "password": "correct-horse-battery-staple",
+    })
     assert resp.status_code == 200
-    # sanitize_client_id strips anything outside [A-Za-z0-9_-]
-    assert resp.json()["client_id"] == "CLI001script"
+    body = resp.json()
+    assert body["role"] == "owner"
+    assert body["client_id"] == signup.json()["client_id"]
+
+
+def test_login_rejects_wrong_password(client):
+    client.post("/api/v1/auth/signup", json={
+        "company_name": "Wrongpw Co", "email": "wrongpw@test.example", "password": "correct-horse-battery-staple",
+    })
+    resp = client.post("/api/v1/auth/login", json={
+        "email": "wrongpw@test.example", "password": "not-the-real-password",
+    })
+    assert resp.status_code == 401
+
+
+def test_login_rejects_unknown_email(client):
+    resp = client.post("/api/v1/auth/login", json={
+        "email": "nobody-signed-up-with-this@test.example", "password": "whatever-password",
+    })
+    assert resp.status_code == 401
 
 
 @pytest.mark.parametrize("method,path", [
@@ -242,3 +298,61 @@ def test_security_headers_present(client):
     resp = client.get("/api/v1/health")
     assert resp.headers.get("x-content-type-options") == "nosniff"
     assert resp.headers.get("x-frame-options") == "DENY"
+
+
+# --- RBAC-01: require_role() gating ----------------------------------------
+# Coverage for the role checks added on top of the existing tenant-only
+# auth -- each of these confirms both halves: the role that SHOULD be
+# rejected gets a real 403 (not a 401 -- the token itself is valid, it's
+# the role that's insufficient), and the role that SHOULD be allowed
+# actually gets through to a normal response.
+
+def test_viewer_cannot_upload_ledger(client, make_auth_headers):
+    headers = make_auth_headers("CLI-RBAC-VIEWER", role="viewer")
+    csv_content = b"date,category,amount,description\n2026-01-05,Sales,1000,Widget sale\n"
+    resp = client.post(
+        "/api/finance/upload-ledger",
+        files={"file": ("ledger.csv", io.BytesIO(csv_content), "text/csv")},
+        headers=headers,
+    )
+    assert resp.status_code == 403
+
+
+def test_member_can_upload_ledger(client, make_auth_headers):
+    headers = make_auth_headers("CLI-RBAC-MEMBER", role="member")
+    csv_content = b"date,category,amount,description\n2026-01-05,Sales,1000,Widget sale\n"
+    resp = client.post(
+        "/api/finance/upload-ledger",
+        files={"file": ("ledger.csv", io.BytesIO(csv_content), "text/csv")},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+
+def test_member_cannot_delete_ledger(client, make_auth_headers):
+    # Destructive/irreversible -- restricted to owner/admin, member excluded.
+    headers = make_auth_headers("CLI-RBAC-MEMBER-DEL", role="member")
+    resp = client.delete("/api/v1/finance/ledger", headers=headers)
+    assert resp.status_code == 403
+
+
+def test_admin_can_delete_ledger(client, make_auth_headers):
+    headers = make_auth_headers("CLI-RBAC-ADMIN-DEL", role="admin")
+    resp = client.delete("/api/v1/finance/ledger", headers=headers)
+    assert resp.status_code == 200
+
+
+def test_viewer_cannot_read_platform_metrics(client, make_auth_headers):
+    # metrics.py's three endpoints report platform-wide (cross-tenant)
+    # data -- restricted to owner/admin.
+    headers = make_auth_headers("CLI-RBAC-METRICS-VIEWER", role="viewer")
+    for path in ("/api/v1/metrics/ingestion", "/api/v1/metrics/swarm", "/api/v1/metrics/ai-usage"):
+        resp = client.get(path, headers=headers)
+        assert resp.status_code == 403, f"{path} should reject viewer, got {resp.status_code}"
+
+
+def test_admin_can_read_platform_metrics(client, make_auth_headers):
+    headers = make_auth_headers("CLI-RBAC-METRICS-ADMIN", role="admin")
+    for path in ("/api/v1/metrics/ingestion", "/api/v1/metrics/swarm", "/api/v1/metrics/ai-usage"):
+        resp = client.get(path, headers=headers)
+        assert resp.status_code == 200, f"{path} should allow admin, got {resp.status_code}"

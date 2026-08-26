@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Briefcase, TrendingUp, Flame, Clock, AlertCircle, Loader2, ChevronRight, Sparkles, Download } from 'lucide-react';
+import { Briefcase, TrendingUp, Flame, Clock, AlertCircle, Loader2, ChevronRight, Sparkles, Download, UploadCloud } from 'lucide-react';
 import { useClientId } from "./ClientContext";
 
 interface CFOPayload {
@@ -9,7 +9,7 @@ interface CFOPayload {
   insights: string[];
 }
 
-export default function VirtualCFOWidget({ refreshTrigger = 0 }: { refreshTrigger?: number }) {
+export default function VirtualCFOWidget({ refreshTrigger = 0, onNavigateToLedger }: { refreshTrigger?: number; onNavigateToLedger?: () => void }) {
   const [data, setData] = useState<CFOPayload | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +68,19 @@ export default function VirtualCFOWidget({ refreshTrigger = 0 }: { refreshTrigge
     fetchCFOBriefing();
   }, [currentClientId, refreshTrigger, authReady, authToken]);
 
+  // A successful fetch with no ledger uploaded yet still returns a 200 with
+  // all-zero/null metrics and an empty insights array -- that's not an
+  // error, so it shouldn't hit the `error` branch, but rendering three bare
+  // "--" tiles and "No strategic insights generated for this period." gives
+  // a first-time user nothing to act on. Treat "all metrics falsy and no
+  // insights" as its own guided empty state instead.
+  const hasNoLedgerData =
+    !!data &&
+    !data.metrics?.gross_margin &&
+    !data.metrics?.burn_rate &&
+    !data.metrics?.cash_runway_months &&
+    (!data.insights || data.insights.length === 0);
+
   const handleExport = () => {
     if (!data) return;
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -116,6 +129,25 @@ export default function VirtualCFOWidget({ refreshTrigger = 0 }: { refreshTrigge
           </div>
         ) : !data ? (
           <div className="text-slate-500 text-sm py-8 text-center">No briefing available.</div>
+        ) : hasNoLedgerData ? (
+          <div className="flex flex-col items-center justify-center h-full text-center py-8 gap-3">
+            <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-full">
+              <UploadCloud className="w-6 h-6 text-indigo-400" />
+            </div>
+            <p className="text-sm font-medium text-slate-300">No ledger data yet</p>
+            <p className="text-xs text-slate-500 max-w-xs">
+              Upload a CSV ledger to generate your first Virtual CFO briefing — gross margin, burn rate, and cash runway will populate automatically.
+            </p>
+            {onNavigateToLedger && (
+              <button
+                onClick={onNavigateToLedger}
+                className="mt-1 bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded text-xs font-semibold transition-colors flex items-center gap-1.5"
+              >
+                <UploadCloud className="w-3 h-3" />
+                Upload Ledger
+              </button>
+            )}
+          </div>
         ) : (
           <div className="space-y-8 animate-in fade-in duration-500">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -167,7 +199,9 @@ export default function VirtualCFOWidget({ refreshTrigger = 0 }: { refreshTrigge
                     </div>
                   ))
                 ) : (
-                  <p className="text-sm text-slate-500 italic">No strategic insights generated for this period.</p>
+                  <p className="text-sm text-slate-500 italic">
+                    No strategic insights generated for this period — insights are produced from your uploaded ledger data, so this usually means the current period doesn't have enough transactions yet.
+                  </p>
                 )}
               </div>
             </div>

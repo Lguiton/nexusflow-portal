@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Any
 
-logger = logging.getLogger("nexusflow.pipeline.rag_service")
+logger = logging.getLogger("eivanta.pipeline.rag_service")
 
 class InMemoryRAGService:
     """

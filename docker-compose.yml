@@ -9,10 +9,25 @@ services:
       - "8000:8000"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - JWT_SECRET=${JWT_SECRET:-enterprise_secure_jwt_fallback_key}
+      # No insecure fallback -- backend/auth.py deliberately removed the old
+      # hardcoded JWT fallback ("a real secret sitting in source control";
+      # see its own comment) and now refuses every request when JWT_SECRET
+      # is unset rather than silently accepting a known default. This
+      # compose file previously reintroduced that exact pattern
+      # (`${JWT_SECRET:-enterprise_secure_jwt_fallback_key}`) even though
+      # auth.py had already moved away from it -- fixed to match. Set
+      # JWT_SECRET in a local .env file (gitignored) before running
+      # `docker compose up`.
+      - JWT_SECRET=${JWT_SECRET}
       - QDRANT_URL=http://qdrant:6333
     volumes:
-      - ./backend/nexus.db:/app/backend/nexus.db
+      # Was ./backend/nexus.db:/app/backend/nexus.db -- db_manager.py's real
+      # DB_PATH is eivanta.duckdb, resolved relative to db_manager.py's
+      # own location, which the Dockerfile COPYs to /app/backend/. The old
+      # path matched neither the real filename nor an actual mount target,
+      # so a compose run would have silently created an empty, wrong-named
+      # db file inside the container instead of persisting real data.
+      - ./backend/eivanta.duckdb:/app/backend/eivanta.duckdb
     depends_on:
       - qdrant
     networks:
@@ -25,6 +40,13 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # NEXT_PUBLIC_* vars are baked into the client bundle at `next build`
+      # time (frontend/Dockerfile's builder stage), not read at container
+      # start -- this runtime environment entry has no effect on the
+      # already-built bundle. Left as documentation of intent for now;
+      # switching this to an actual build ARG is real Phase 6/8 follow-up
+      # work, not done here since it only matters once this points at
+      # something other than localhost (i.e. real deployment).
       - NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
     depends_on:
       - backend

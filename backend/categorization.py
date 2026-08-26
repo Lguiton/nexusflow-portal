@@ -14,13 +14,13 @@ from pydantic import BaseModel
 
 try:
     from backend import db_manager
-    from backend.auth import verify_jwt_and_get_client_id
+    from backend.auth import verify_jwt_and_get_client_id, require_role, AuthenticatedUser
 except ImportError:
     import db_manager
-    from auth import verify_jwt_and_get_client_id
+    from auth import verify_jwt_and_get_client_id, require_role, AuthenticatedUser
 
 router = APIRouter()
-logger = logging.getLogger("nexusflow.categorization")
+logger = logging.getLogger("eivanta.categorization")
 
 
 class ApplyCategorySuggestionRequest(BaseModel):
@@ -40,8 +40,10 @@ async def get_category_suggestions(client_id: str = Depends(verify_jwt_and_get_c
 @router.post("/api/v1/data/apply-category-suggestion")
 async def apply_category_suggestion_endpoint(
     req: ApplyCategorySuggestionRequest,
-    client_id: str = Depends(verify_jwt_and_get_client_id),
+    # RBAC-01: mutates real ledger data -- viewer excluded.
+    user: AuthenticatedUser = Depends(require_role("owner", "admin", "member")),
 ):
+    client_id = user.client_id
     try:
         updated = await db_manager.apply_category_suggestion(client_id, req.row_id, req.new_category)
         if not updated:

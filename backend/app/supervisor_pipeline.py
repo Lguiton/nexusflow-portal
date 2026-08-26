@@ -3,7 +3,7 @@ import logging
 import pandas as pd
 from typing import Dict, Any
 
-logger = logging.getLogger("NexusFlow-SupervisorPipeline")
+logger = logging.getLogger("Eivanta-SupervisorPipeline")
 
 class SequentialSupervisorPipeline:
     def __init__(self):

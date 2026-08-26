@@ -128,7 +128,7 @@ export default function OnboardingChecklist({ refreshTrigger = 0 }: OnboardingCh
           </div>
           <div>
             <h2 className="text-lg font-bold text-white">Getting Started</h2>
-            <p className="text-xs text-slate-400">Your progress unlocking NexusFlow's analysis</p>
+            <p className="text-xs text-slate-400">Your progress unlocking Eivanta's analysis</p>
           </div>
         </div>
         {items && (

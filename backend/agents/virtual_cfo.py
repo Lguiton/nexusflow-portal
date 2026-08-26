@@ -16,7 +16,7 @@ except ImportError:
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
 
-logger = logging.getLogger("nexusflow.virtual_cfo")
+logger = logging.getLogger("eivanta.virtual_cfo")
 
 # AI-03: previously no explicit request timeout at all -- a hung OpenAI
 # request had no client-side bound. max_retries matches the openai SDK's
@@ -168,7 +168,7 @@ def generate_cfo_briefing(client_id: str = "default_client") -> Dict[str, Any]:
     cash_runway_months = (ASSUMED_CASH_RESERVES / burn_rate) if burn_rate > 0 else 99.9
 
     system_prompt = f"""
-    You are NexusFlow's elite Virtual Chief Financial Officer (CFO).
+    You are Eivanta's elite Virtual Chief Financial Officer (CFO).
     Tenant: {safe_client_id}.
     Calculated Metrics -> Revenue: ${total_revenue:,.2f}, COGS: ${total_cogs:,.2f}, OPEX: ${total_opex:,.2f}, Gross Margin: {gross_margin:.1f}%, Burn Rate: ${burn_rate:,.2f}, Runway: {cash_runway_months:.1f} months.
     IMPORTANT: the runway figure assumes a hypothetical ${ASSUMED_CASH_RESERVES:,.2f} cash reserve, not this tenant's actual bank balance (the system does not yet ingest real cash-balance data). Any insight referencing runway must state this is an estimate based on an assumed reserve, not a confirmed cash position.

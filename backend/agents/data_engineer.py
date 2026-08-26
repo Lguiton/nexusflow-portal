@@ -17,7 +17,7 @@ except ImportError:
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
 
-logger = logging.getLogger("nexusflow.data_engineer")
+logger = logging.getLogger("eivanta.data_engineer")
 
 
 # AI-03: previously no explicit request timeout at all. max_retries matches
@@ -163,7 +163,7 @@ def analyze_schema_quality(client_id: str = "default_client") -> Dict[str, Any]:
         }
 
     system_prompt = f"""
-    You are Agent #02, NexusFlow's Systems Analyst and Data Engineer.
+    You are Agent #02, Eivanta's Systems Analyst and Data Engineer.
     Tenant: {safe_client_id}.
     Real measured data for this tenant -> Total rows: {metrics['total_rows']}, Uncategorized rows: {metrics['uncategorized_rows']}, Rows with default description: {metrics['default_description_rows']}, Date range: {metrics['earliest_date']} to {metrics['latest_date']}.
 

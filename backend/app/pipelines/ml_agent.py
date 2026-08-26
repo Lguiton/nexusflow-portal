@@ -2,7 +2,7 @@ import logging
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
-logger = logging.getLogger("nexusflow.pipeline.ml_agent")
+logger = logging.getLogger("eivanta.pipeline.ml_agent")
 
 class PredictiveChurnEngine:
     """

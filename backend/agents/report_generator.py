@@ -16,7 +16,7 @@ except ImportError:
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
 
-logger = logging.getLogger("nexusflow.report_generator")
+logger = logging.getLogger("eivanta.report_generator")
 
 
 # AI-03: previously no explicit request timeout at all. max_retries matches
@@ -308,7 +308,7 @@ def generate_stakeholder_report(client_id: str = "default_client") -> Dict[str, 
     )
 
     system_prompt = f"""
-    You are Agent #06, NexusFlow's Report Generator.
+    You are Agent #06, Eivanta's Report Generator.
     Tenant: {safe_client_id}
     Real measured ledger data -> Total Revenue: ${metrics['total_revenue']:,.2f}, Total Outflows: ${metrics['total_expenses']:,.2f}, Net Position: ${net_income:,.2f}, Ingested Records: {metrics['record_count']}. Top revenue category: {top_cat_str}. Revenue trend: {trend_str}.
 

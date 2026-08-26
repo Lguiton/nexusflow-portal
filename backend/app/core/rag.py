@@ -23,7 +23,7 @@ def init_vector_db():
                 PointStruct(
                     id=str(uuid.uuid4()),
                     vector=[0.1, 0.2, 0.3, 0.4],
-                    payload={"content": "NexusFlow AI Agents reduce manual CRM entry time by 80% using async ETL pipelines."}
+                    payload={"content": "Eivanta AI Agents reduce manual CRM entry time by 80% using async ETL pipelines."}
                 )
             ]
         )

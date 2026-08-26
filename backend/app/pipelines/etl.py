@@ -3,7 +3,7 @@ import pandas as pd
 from pathlib import Path
 from backend.db_manager import ingest_csv_to_db
 
-logger = logging.getLogger("nexusflow.pipeline.etl")
+logger = logging.getLogger("eivanta.pipeline.etl")
 
 class EnterpriseETLPipeline:
     """

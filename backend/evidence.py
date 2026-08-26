@@ -23,13 +23,17 @@ except ImportError:
     from auth import verify_jwt_and_get_client_id
 
 router = APIRouter()
-logger = logging.getLogger("nexusflow.evidence")
+logger = logging.getLogger("eivanta.evidence")
 
 
 class LedgerRowsRequest(BaseModel):
     category: Optional[str] = None
     month: Optional[str] = None
     limit: int = 200
+    # Track 5 global time-range selector: a real inclusive date range,
+    # independent of the exact "month" match above.
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
 
 
 @router.post("/api/v1/finance/ledger-rows")
@@ -38,7 +42,10 @@ async def get_ledger_rows_endpoint(
     client_id: str = Depends(verify_jwt_and_get_client_id),
 ):
     try:
-        return await db_manager.get_ledger_rows(client_id, category=req.category, month=req.month, limit=req.limit)
+        return await db_manager.get_ledger_rows(
+            client_id, category=req.category, month=req.month, limit=req.limit,
+            date_from=req.date_from, date_to=req.date_to,
+        )
     except Exception as e:
         logger.error(f"Failed to fetch ledger rows for tenant '{client_id}': {e}")
         raise HTTPException(status_code=502, detail="Unable to load ledger rows right now.")

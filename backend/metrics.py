@@ -13,12 +13,12 @@ except ImportError:
     from agent_registry import agent_registry
 
 try:
-    from .auth import verify_jwt_and_get_client_id
+    from .auth import require_role, AuthenticatedUser
 except ImportError:
-    from auth import verify_jwt_and_get_client_id
+    from auth import require_role, AuthenticatedUser
 
 router = APIRouter()
-logger = logging.getLogger("nexusflow.metrics")
+logger = logging.getLogger("eivanta.metrics")
 
 
 @router.on_event("startup")
@@ -48,13 +48,16 @@ class SwarmMetrics(BaseModel):
 
 
 @router.get("/api/v1/metrics/ingestion", response_model=IngestionMetrics)
-async def get_ingestion_metrics(client_id: str = Depends(verify_jwt_and_get_client_id)):
-    # NOTE: get_total_ingested_rows() returns a platform-wide total across
-    # ALL tenants -- it isn't filtered to `client_id`'s data in db_manager.py.
-    # Requiring a valid token at least closes the "fully public,
-    # unauthenticated" gap, but whether this should become a per-tenant
-    # count or stay an admin/ops-only metric (gated once real RBAC exists)
-    # is a product decision, not something to guess at here.
+async def get_ingestion_metrics(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
+    # RBAC-01: this endpoint's own prior comment predicted exactly this --
+    # get_total_ingested_rows() returns a platform-wide total across ALL
+    # tenants, not filtered to the caller's own client_id. Restricting to
+    # owner/admin closes off casual member/viewer access to cross-tenant
+    # data, but does NOT fully close the underlying leak: an owner/admin
+    # from Tenant A can still see a number that includes Tenant B's rows,
+    # because get_total_ingested_rows() itself has no per-tenant filter.
+    # That's a data-layer fix in db_manager.py, out of scope for this
+    # auth-layer pass -- flagged, not silently left implied-fixed.
     try:
         total_rows = await get_total_ingested_rows()
         return {"total_rows": total_rows, "status": "success"}
@@ -64,9 +67,9 @@ async def get_ingestion_metrics(client_id: str = Depends(verify_jwt_and_get_clie
 
 
 @router.get("/api/v1/metrics/swarm", response_model=SwarmMetrics)
-async def get_swarm_metrics(client_id: str = Depends(verify_jwt_and_get_client_id)):
-    # Same open question as above -- this reports platform-wide swarm/agent
-    # health, not anything scoped to `client_id`.
+async def get_swarm_metrics(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
+    # RBAC-01: same platform-wide-not-per-tenant posture and same partial
+    # fix as get_ingestion_metrics above -- see its comment.
     try:
         active_count, total_capacity, status_map, failures = agent_registry.get_health_status()
         verification_struct = agent_registry.verify_mathematical_integrity()
@@ -101,12 +104,9 @@ async def get_swarm_metrics(client_id: str = Depends(verify_jwt_and_get_client_i
 
 
 @router.get("/api/v1/metrics/ai-usage")
-async def get_ai_usage_metrics(client_id: str = Depends(verify_jwt_and_get_client_id)):
-    # AI-06: token/cost telemetry. Same disclosed posture as the two metrics
-    # endpoints above -- platform-wide aggregate, not scoped to `client_id`,
-    # pending a real RBAC/admin tier to gate a per-tenant cost breakdown
-    # behind. Every authenticated tenant can currently see this platform-wide
-    # total, same as swarm/ingestion metrics already do.
+async def get_ai_usage_metrics(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
+    # AI-06 + RBAC-01: same platform-wide-not-per-tenant posture and same
+    # partial fix as the two metrics endpoints above -- see get_ingestion_metrics's comment.
     try:
         return await get_ai_usage_summary(window=500)
     except Exception as e:

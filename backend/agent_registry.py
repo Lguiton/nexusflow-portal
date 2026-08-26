@@ -2,7 +2,7 @@ import importlib
 import logging
 from typing import Dict, List, Tuple
  
-logger = logging.getLogger("nexusflow.registry")
+logger = logging.getLogger("eivanta.registry")
  
 # Explicit list of mandatory enterprise agent module paths.
 #

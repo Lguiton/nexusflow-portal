@@ -3,7 +3,7 @@ import time
 import logging
 from typing import Dict, Any, List
 
-logger = logging.getLogger("NexusFlow-SecurityDevOps")
+logger = logging.getLogger("Eivanta-SecurityDevOps")
 
 class CybersecuritySentinelAgent:
     """Agent #20: The Sentinel Shield - PII scrubbing & injection protection."""
@@ -91,7 +91,7 @@ class DevOpsSiteReliabilityAgent:
             "cpu_utilization_pct": 14.2,
             "memory_usage_mb": 312.8,
             "memory_limit_mb": 1024.0,
-            "active_container_bridges": ["nexusflow_backend", "nexusflow_frontend"],
+            "active_container_bridges": ["eivanta_backend", "eivanta_frontend"],
             "high_availability_status": "READY"
         }
 

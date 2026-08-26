@@ -77,7 +77,7 @@ export default function KnownGapsPanel({ refreshTrigger = 0 }: KnownGapsPanelPro
           <HelpCircle className="w-5 h-5 text-sky-400" />
         </div>
         <div>
-          <h2 className="text-lg font-bold text-white">What NexusFlow Doesn't Know Yet</h2>
+          <h2 className="text-lg font-bold text-white">What Eivanta Doesn't Know Yet</h2>
           <p className="text-xs text-slate-400">Real, current limitations for this tenant -- not a hedge, an actual list</p>
         </div>
       </div>

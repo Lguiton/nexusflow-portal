@@ -16,7 +16,7 @@ HOW TO RUN:
         python3 test_db_manager_live.py
 
     It creates its own throwaway DuckDB file in a temp directory (it does
-    NOT touch backend/nexusflow.duckdb or any of your real data) and
+    NOT touch backend/eivanta.duckdb or any of your real data) and
     deletes it afterward. Paste the full output back so we can review it
     together -- per the audit's rules of engagement, I don't want to just
     tell you "looks good," I want to see the real output.
@@ -60,7 +60,7 @@ def make_csv(path, rows_csv_text):
 
 async def main():
     tmp_dir = tempfile.mkdtemp(prefix="nf_db_manager_live_test_")
-    test_db_path = os.path.join(tmp_dir, "test_nexusflow.duckdb")
+    test_db_path = os.path.join(tmp_dir, "test_eivanta.duckdb")
     # Point db_manager at a throwaway DB file for this run only. Every
     # function reads the module-level DB_PATH fresh at call time (it's not
     # captured as a default-arg at import time), so reassigning it here is

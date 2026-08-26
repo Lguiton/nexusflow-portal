@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { ClientProvider } from '../components/ClientContext';
+import AuthGate from '../components/AuthGate';
 import AppShell from '../components/AppShell';
 import type { ViewId } from '../components/AppShell';
 import CommandPalette from '../components/CommandPalette';
@@ -12,7 +13,7 @@ import SwarmView from '../components/views/SwarmView';
 import TrustView from '../components/views/TrustView';
 import type { HealthData } from '../components/SystemHealthStrip';
 
-// One-page NexusFlow Console. Replaces the previous layout, which stacked
+// One-page Eivanta Console. Replaces the previous layout, which stacked
 // every real widget vertically down one very tall page (Header -> System
 // tiles -> Onboarding -> Search -> KPIs -> Swarm telemetry -> Analytics ->
 // Charts -> CFO/Data Engineer -> Gaps/Assumptions -> Suggestions/Ledger ->
@@ -26,7 +27,7 @@ import type { HealthData } from '../components/SystemHealthStrip';
 // This version keeps every real widget exactly as it was (same data
 // fetching, same endpoints, same error/empty states) and only changes how
 // they're organized: five short, independently-scrolled sections behind a
-// sidebar, matching the approved NexusFlow Console design mockup.
+// sidebar, matching the approved Eivanta Console design mockup.
 interface SearchResult {
   query: string;
   synthesized_insight: string;
@@ -83,44 +84,49 @@ export default function CoreDashboard() {
 
   return (
     <ClientProvider>
-      <AppShell
-        activeView={activeView}
-        onChangeView={setActiveView}
-        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-        health={health}
-        healthChecked={!healthLoading}
-      >
-        {activeView === 'overview' && (
-          <OverviewView
-            health={health}
-            healthLoading={healthLoading}
-            refreshTrigger={dashboardRefreshTrigger}
-            onUploadSuccess={bumpRefresh}
-          />
-        )}
-        {activeView === 'analytics' && (
-          <AnalyticsView refreshTrigger={dashboardRefreshTrigger} />
-        )}
-        {activeView === 'ledger' && (
-          <LedgerView
-            refreshTrigger={dashboardRefreshTrigger}
-            onUploadSuccess={bumpRefresh}
-            onApplied={bumpRefresh}
-          />
-        )}
-        {activeView === 'swarm' && (
-          <SwarmView searchResult={searchResult} onQueryResult={(data) => setSearchResult(data)} />
-        )}
-        {activeView === 'trust' && (
-          <TrustView refreshTrigger={dashboardRefreshTrigger} />
-        )}
-      </AppShell>
+      <AuthGate>
+        <AppShell
+          activeView={activeView}
+          onChangeView={setActiveView}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+          health={health}
+          healthChecked={!healthLoading}
+        >
+          {activeView === 'overview' && (
+            <OverviewView
+              health={health}
+              healthLoading={healthLoading}
+              refreshTrigger={dashboardRefreshTrigger}
+              onUploadSuccess={bumpRefresh}
+            />
+          )}
+          {activeView === 'analytics' && (
+            <AnalyticsView
+              refreshTrigger={dashboardRefreshTrigger}
+              onNavigateToLedger={() => setActiveView('ledger')}
+            />
+          )}
+          {activeView === 'ledger' && (
+            <LedgerView
+              refreshTrigger={dashboardRefreshTrigger}
+              onUploadSuccess={bumpRefresh}
+              onApplied={bumpRefresh}
+            />
+          )}
+          {activeView === 'swarm' && (
+            <SwarmView searchResult={searchResult} onQueryResult={(data) => setSearchResult(data)} />
+          )}
+          {activeView === 'trust' && (
+            <TrustView refreshTrigger={dashboardRefreshTrigger} />
+          )}
+        </AppShell>
 
-      <CommandPalette
-        isOpen={commandPaletteOpen}
-        onClose={() => setCommandPaletteOpen(false)}
-        onSelectAction={(id) => setActiveView(id as ViewId)}
-      />
+        <CommandPalette
+          isOpen={commandPaletteOpen}
+          onClose={() => setCommandPaletteOpen(false)}
+          onSelectAction={(id) => setActiveView(id as ViewId)}
+        />
+      </AuthGate>
     </ClientProvider>
   );
 }

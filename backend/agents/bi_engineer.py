@@ -16,7 +16,7 @@ except ImportError:
 
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
-logger = logging.getLogger("nexusflow.bi_engineer")
+logger = logging.getLogger("eivanta.bi_engineer")
 
 # AI-03: previously no explicit request timeout at all. max_retries matches
 # the openai SDK's own default (2), made explicit here rather than left
@@ -517,7 +517,7 @@ def generate_bi_summary(client_id: str = "default_client", query: str = "") -> D
     numbers differently than shown."""
 
     system_prompt = f"""
-    You are Agent #05, NexusFlow's Business Intelligence Engineer.
+    You are Agent #05, Eivanta's Business Intelligence Engineer.
     Tenant: {safe_client_id}
     Categorical Data Summary: {json.dumps(category_breakdown)}
     Total Ledger Records: {total_records}

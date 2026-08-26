@@ -1,7 +1,7 @@
 import logging
 import pandas as pd
 
-logger = logging.getLogger("nexusflow.pipeline.financial_intelligence")
+logger = logging.getLogger("eivanta.pipeline.financial_intelligence")
 
 def compute_financial_health_indicators(df: pd.DataFrame) -> dict:
     """Calculates macro SaaS financial metrics from DuckDB query results."""

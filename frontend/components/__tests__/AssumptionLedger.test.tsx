@@ -7,10 +7,17 @@ function renderWithProvider(ui: React.ReactElement) {
   return render(<ClientProvider>{ui}</ClientProvider>);
 }
 
+// RBAC-01: ClientContext no longer auto-authenticates on mount (the old
+// dev-login flow) -- it only validates an already-stored token via
+// GET /api/v1/auth/me. Seeding sessionStorage + mocking /me is the real
+// equivalent of what mocking dev-login used to fake.
 function mockFetch(assumptionsResponse: any) {
   (global.fetch as jest.Mock).mockImplementation((url: string) => {
-    if (url.includes('/api/v1/auth/dev-login')) {
-      return Promise.resolve({ ok: true, json: async () => ({ access_token: 'test-token' }) });
+    if (url.includes('/api/v1/auth/me')) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ user_id: 1, client_id: 'CLI-001', email: 'owner@test.example', role: 'owner' }),
+      });
     }
     if (url.includes('/api/v1/assumptions')) {
       return Promise.resolve({ ok: true, json: async () => assumptionsResponse });
@@ -21,6 +28,7 @@ function mockFetch(assumptionsResponse: any) {
 
 beforeEach(() => {
   global.fetch = jest.fn();
+  window.sessionStorage.setItem('nexus_access_token', 'test-token');
 });
 
 afterEach(() => {
@@ -56,8 +64,11 @@ describe('AssumptionLedger', () => {
 
   it('shows a translated error message rather than a raw fetch failure', async () => {
     (global.fetch as jest.Mock).mockImplementation((url: string) => {
-      if (url.includes('/api/v1/auth/dev-login')) {
-        return Promise.resolve({ ok: true, json: async () => ({ access_token: 'test-token' }) });
+      if (url.includes('/api/v1/auth/me')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ user_id: 1, client_id: 'CLI-001', email: 'owner@test.example', role: 'owner' }),
+        });
       }
       return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
     });

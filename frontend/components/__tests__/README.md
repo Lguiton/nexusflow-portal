@@ -1,4 +1,4 @@
-# NexusFlow frontend test suite (Jest + React Testing Library)
+# Eivanta frontend test suite (Jest + React Testing Library)
 
 Real component tests, not a stub harness. Every test renders the actual
 component through a real `ClientProvider` (so the dev-login flow, and

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Search, Sparkles, Terminal, CheckCircle2, ArrowRight, Loader2, AlertCircle, Database, Webhook, ListChecks, ShieldAlert } from 'lucide-react';
 import { useClientId } from './ClientContext';
 import DynamicChartEngine from './DynamicChartEngine';
@@ -27,13 +27,37 @@ interface CognitiveSearchBarProps {
 const MAX_QUERY_LENGTH = 1000;
 const REQUEST_TIMEOUT_MS = 30000;
 
+// Track 7 [Low]: the placeholder used to be one fixed example, which gave
+// first-time users no real sense of the range of natural-language queries
+// this bar actually supports. Rotate through a few real examples instead.
+const EXAMPLE_QUERIES = [
+  "What was our total MRR for the year 2022?",
+  "Which category had the highest spend last quarter?",
+  "Show me our cash runway trend over the last 6 months",
+  "Flag any transactions that look like duplicates",
+];
+const PLACEHOLDER_ROTATE_MS = 4000;
+
 export default function CognitiveSearchBar({ onQueryResult }: CognitiveSearchBarProps) {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null);
+  const [exampleIdx, setExampleIdx] = useState(0);
+  const [inputFocused, setInputFocused] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Only rotate while the field is empty and unfocused -- once someone is
+  // typing (or has typed and cleared, but is still focused) the rotation
+  // would be a distracting flicker rather than a helpful hint.
+  useEffect(() => {
+    if (query || inputFocused) return;
+    const id = setInterval(() => {
+      setExampleIdx((i) => (i + 1) % EXAMPLE_QUERIES.length);
+    }, PLACEHOLDER_ROTATE_MS);
+    return () => clearInterval(id);
+  }, [query, inputFocused]);
 
   // Fixed 2026-08-23 -- this component previously never sent an
   // Authorization header at all, and instead put a `client_id` field in
@@ -277,9 +301,11 @@ export default function CognitiveSearchBar({ onQueryResult }: CognitiveSearchBar
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onFocus={() => setInputFocused(true)}
+            onBlur={() => setInputFocused(false)}
             maxLength={MAX_QUERY_LENGTH}
             disabled={!authReady}
-            placeholder={authReady ? "Ask anything (e.g., 'What was our total mrr for the year 2022?')..." : "Authenticating..."}
+            placeholder={authReady ? `Ask anything (e.g., '${EXAMPLE_QUERIES[exampleIdx]}')...` : "Authenticating..."}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl py-3 pl-12 pr-32 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors shadow-inner disabled:opacity-60"
           />
           <button

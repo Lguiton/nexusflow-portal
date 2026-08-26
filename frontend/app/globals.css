@@ -26,8 +26,8 @@ body {
 }
 
 /* ================================================================
-   NexusFlow Console shell tokens
-   Ported from the approved "NexusFlow Console" design mockup. The
+   Eivanta Console shell tokens
+   Ported from the approved "Eivanta Console" design mockup. The
    whole app already commits to a single dark theme (every real
    widget below uses bg-slate-900/950 directly), so these are painted
    once here rather than adapting to the viewer's OS theme. Scoped

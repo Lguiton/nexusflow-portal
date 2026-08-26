@@ -3,7 +3,7 @@ import { Manrope, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
 // Swapped from the default create-next-app Geist fonts to match the
-// approved NexusFlow Console design mockup: Manrope for UI text, IBM Plex
+// approved Eivanta Console design mockup: Manrope for UI text, IBM Plex
 // Mono for numeric/tabular data (ledger amounts, agent status, timestamps)
 // -- chosen to lean into this product's own terminal/quant identity
 // (Live Swarm Telemetry, DuckDB) rather than a generic AI-app look.
@@ -20,8 +20,8 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NexusFlow Console",
-  description: "NexusFlow Analytics -- Enterprise AI Systems & Business Intelligence Gateway",
+  title: "Eivanta Console",
+  description: "Eivanta -- Enterprise AI Systems & Business Intelligence Gateway",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

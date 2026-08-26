@@ -11,7 +11,7 @@ try:
     from backend.websocket_manager import manager
 except ImportError:
     from websocket_manager import manager
-logger = logging.getLogger("nexusflow.orchestrator")
+logger = logging.getLogger("eivanta.orchestrator")
 class SwarmState(TypedDict):
     client_id: str
     query: str

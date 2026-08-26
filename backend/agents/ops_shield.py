@@ -1,18 +1,19 @@
 import os, json, logging
 from typing import Dict, Any
 from dotenv import load_dotenv
-from openai import OpenAI
 
 try:
     from backend.db_manager import log_ai_usage_sync
     from backend.model_registry import get_model
+    from backend.byok import get_openai_client_for_tenant_sync
 except ImportError:
     from db_manager import log_ai_usage_sync
     from model_registry import get_model
+    from byok import get_openai_client_for_tenant_sync
 
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
-logger = logging.getLogger("nexusflow.ops_shield")
+logger = logging.getLogger("eivanta.ops_shield")
 
 # AI-03: previously no explicit request timeout at all. max_retries matches
 # the openai SDK's own default (2), made explicit here rather than left
@@ -20,11 +21,17 @@ logger = logging.getLogger("nexusflow.ops_shield")
 AI_REQUEST_TIMEOUT_SECONDS = 30.0
 AI_MAX_RETRIES = 2
 
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key, timeout=AI_REQUEST_TIMEOUT_SECONDS, max_retries=AI_MAX_RETRIES) if api_key else None
+# BYOK-01: this used to be a single module-level client built once from the
+# platform's own OPENAI_API_KEY at import time -- fine when every tenant
+# shares the platform key, but incapable of ever routing to a tenant's own
+# key. platform_api_key is kept as the fallback; the actual client is now
+# built per-call in analyze_threat() via get_openai_client_for_tenant_sync,
+# which uses the calling tenant's BYOK key when they've configured one.
+platform_api_key = os.getenv("OPENAI_API_KEY")
 
 def analyze_threat(client_id: str, payload: str) -> Dict[str, Any]:
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
+    client = get_openai_client_for_tenant_sync(client_id, platform_api_key, AI_REQUEST_TIMEOUT_SECONDS, AI_MAX_RETRIES)
 
     system_prompt = f"""
     You are the Ops Shield Semantic Firewall.

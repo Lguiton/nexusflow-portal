@@ -10,13 +10,14 @@ import {
   Search,
   Bell,
   ArrowUpFromLine,
+  LogOut,
 } from "lucide-react";
 import { useClientId } from "./ClientContext";
 import type { HealthData } from "./SystemHealthStrip";
 
-// AppShell -- the sidebar + topbar chrome for the one-page NexusFlow
+// AppShell -- the sidebar + topbar chrome for the one-page Eivanta
 // Console layout, ported from the approved static design mockup
-// (nexusflow_console.html). This replaces the old page.tsx pattern of
+// (eivanta_console.html). This replaces the old page.tsx pattern of
 // stacking every widget vertically down one long scrolling page (the
 // direct cause of the "it auto-scrolls back to the middle" complaint --
 // a 5000px-tall page made any programmatic scroll, even one scoped
@@ -54,7 +55,7 @@ const VIEW_META: Record<ViewId, { label: string; title: string; subtitle: string
   trust: {
     label: "Trust & Gaps",
     title: "Trust & Gaps",
-    subtitle: "What NexusFlow knows for certain, and what it doesn't yet.",
+    subtitle: "What Eivanta knows for certain, and what it doesn't yet.",
     icon: ShieldCheck,
   },
 };
@@ -75,10 +76,20 @@ interface AppShellProps {
 }
 
 export default function AppShell({ activeView, onChangeView, onOpenCommandPalette, health, healthChecked, children }: AppShellProps) {
-  const clientCtx = useClientId() as any;
-  const clientId: string = clientCtx?.clientId ?? "CLI-001";
-  const authReady: boolean = clientCtx?.authReady ?? false;
-  const authToken: string | null = clientCtx?.authToken ?? null;
+  const clientCtx = useClientId();
+  const clientId: string = clientCtx.clientId || "CLI-001";
+  const authReady: boolean = clientCtx.authReady;
+  const authToken: string | null = clientCtx.authToken;
+  const user = clientCtx.user;
+  const logout = clientCtx.logout;
+
+  // RBAC-01: the "Upload Ledger" shortcut in the topbar hits the same
+  // upload endpoint the Ledger view's own uploader does, and that endpoint
+  // now requires owner/admin/member -- a viewer clicking this would just
+  // get a 403 from the backend, so hide it for viewers rather than let
+  // them find that out the hard way. The Ledger view itself is still
+  // reachable via the sidebar for viewers (read-only content there).
+  const canUpload = user?.role !== "viewer";
 
   const meta = VIEW_META[activeView];
   const accentAttr = activeView === "overview" ? undefined : activeView;
@@ -92,7 +103,7 @@ export default function AppShell({ activeView, onChangeView, onOpenCommandPalett
   }, [accentAttr]);
 
   const isOnline = healthChecked && health !== null;
-  const initials = clientId.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "NF";
+  const initials = (user?.email || clientId).replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "NF";
 
   return (
     <div className="nf-shell">
@@ -111,7 +122,7 @@ export default function AppShell({ activeView, onChangeView, onOpenCommandPalett
               </linearGradient>
             </defs>
           </svg>
-          <div className="nf-brand-word">NexusFlow<small>ANALYTICS CONSOLE</small></div>
+          <div className="nf-brand-word">Eivanta<small>ANALYTICS CONSOLE</small></div>
         </div>
 
         <nav className="nf-nav-group">
@@ -138,9 +149,21 @@ export default function AppShell({ activeView, onChangeView, onOpenCommandPalett
         <div className="nf-sidebar-foot">
           <span className="nf-tenant-dot" style={{ background: authReady && authToken ? undefined : "#545d82" }} />
           <div className="nf-sidebar-foot-text">
-            <div className="t1">{clientId}</div>
-            <div className="t2">{authReady && authToken ? "JWT verified" : authReady ? "Auth unavailable" : "Authenticating..."}</div>
+            <div className="t1" title={user?.email}>{user?.email ?? clientId}</div>
+            <div className="t2">
+              {user ? `${user.role.charAt(0).toUpperCase()}${user.role.slice(1)} · ${clientId}` : authReady ? "Auth unavailable" : "Authenticating..."}
+            </div>
           </div>
+          {user && (
+            <button
+              className="nf-icon-btn"
+              title="Sign out"
+              aria-label="Sign out"
+              onClick={logout}
+            >
+              <LogOut />
+            </button>
+          )}
         </div>
       </aside>
 
@@ -162,11 +185,13 @@ export default function AppShell({ activeView, onChangeView, onOpenCommandPalett
               {!isOnline && healthChecked && <span className="nf-ping" />}
               <Bell />
             </button>
-            <button className="nf-btn-primary" onClick={() => onChangeView("ledger")}>
-              <ArrowUpFromLine />
-              Upload Ledger
-            </button>
-            <div className="nf-avatar-badge">{initials}</div>
+            {canUpload && (
+              <button className="nf-btn-primary" onClick={() => onChangeView("ledger")}>
+                <ArrowUpFromLine />
+                Upload Ledger
+              </button>
+            )}
+            <div className="nf-avatar-badge" title={user?.email}>{initials}</div>
           </div>
         </header>
 

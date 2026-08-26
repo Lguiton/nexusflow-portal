@@ -4,7 +4,7 @@ from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-SECRET_KEY = "NEXUSFLOW_SUPER_SECRET_PRODUCTION_KEY_CHANGE_IN_ENV"
+SECRET_KEY = "EIVANTA_SUPER_SECRET_PRODUCTION_KEY_CHANGE_IN_ENV"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 

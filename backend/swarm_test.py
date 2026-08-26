@@ -24,7 +24,7 @@ def test_lean_intent_routing():
     NOTE: this calls the real route_query(), which executes whichever
     specialist agent the router selects (e.g. generate_cfo_briefing,
     generate_forecast) for real -- that means a configured OPENAI_API_KEY
-    and a reachable backend/nexusflow.duckdb are required to run this test,
+    and a reachable backend/eivanta.duckdb are required to run this test,
     same as the existing test_db_manager_live.py convention in this repo.
     I could not execute this myself: FastAPI/DuckDB/OpenAI aren't
     installable in my review sandbox (no network access to those

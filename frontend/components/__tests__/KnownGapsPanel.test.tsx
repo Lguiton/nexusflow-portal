@@ -7,12 +7,16 @@ function renderWithProvider(ui: React.ReactElement) {
   return render(<ClientProvider>{ui}</ClientProvider>);
 }
 
+// RBAC-01: ClientContext only auto-authenticates via a stored token
+// (validated against /api/v1/auth/me) -- mock that instead of the
+// retired dev-login endpoint; sessionStorage is seeded in beforeEach
+// below so there's actually a token for it to validate.
 function mockFetch({ gapsOk, gaps }: { gapsOk: boolean; gaps?: any[] }) {
   (global.fetch as jest.Mock).mockImplementation((url: string) => {
-    if (url.includes('/api/v1/auth/dev-login')) {
+    if (url.includes('/api/v1/auth/me')) {
       return Promise.resolve({
         ok: true,
-        json: async () => ({ access_token: 'test-token', client_id: 'CLI-001' }),
+        json: async () => ({ user_id: 1, client_id: 'CLI-001', email: 'owner@test.example', role: 'owner' }),
       });
     }
     if (url.includes('/api/v1/insights/known-gaps')) {
@@ -30,6 +34,7 @@ function mockFetch({ gapsOk, gaps }: { gapsOk: boolean; gaps?: any[] }) {
 
 beforeEach(() => {
   global.fetch = jest.fn();
+  window.sessionStorage.setItem('nexus_access_token', 'test-token');
 });
 
 afterEach(() => {

@@ -1,4 +1,4 @@
-# NexusFlow E2E suite (Playwright)
+# Eivanta E2E suite (Playwright)
 
 Real browser, real Next.js dev server, real FastAPI backend, real DuckDB
 file. Nothing here is mocked -- this is the layer above the Jest suite

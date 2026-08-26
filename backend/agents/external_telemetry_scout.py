@@ -15,7 +15,7 @@ except ImportError:
 
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
-logger = logging.getLogger("nexusflow.external_telemetry_scout")
+logger = logging.getLogger("eivanta.external_telemetry_scout")
 
 # AI-03: previously no explicit request timeout at all. max_retries matches
 # the openai SDK's own default (2), made explicit here rather than left

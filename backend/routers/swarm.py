@@ -7,7 +7,7 @@ from backend.auth import verify_ws_token, sanitize_client_id
 from backend.websocket_manager import manager
  
 router = APIRouter()
-logger = logging.getLogger("nexusflow.swarm_ws")
+logger = logging.getLogger("eivanta.swarm_ws")
  
  
 @router.websocket("/ws/swarm/{client_id}/{session_id}")

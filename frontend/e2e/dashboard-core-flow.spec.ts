@@ -21,12 +21,12 @@ import path from 'path';
 // suite (see comments below on each assertion), and `workers: 1` /
 // `fullyParallel: false` in playwright.config.ts keep these specs from
 // racing each other over that shared state.
-test.describe.serial('NexusFlow dashboard core flow', () => {
+test.describe.serial('Eivanta dashboard core flow', () => {
   test('loads, authenticates automatically, and renders real (not placeholder) widget data', async ({ page }) => {
     await page.goto('/');
 
     // Header chrome renders regardless of backend state.
-    await expect(page.getByRole('heading', { name: /NexusFlow Analytics/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Eivanta/i })).toBeVisible();
 
     // ClientProvider's dev-login effect must have completed successfully
     // against a real backend for this to ever show "Supervisor Online" --
@@ -47,7 +47,7 @@ test.describe.serial('NexusFlow dashboard core flow', () => {
 
     // Real CSV, written to a real temp file -- setInputFiles needs an
     // actual file on disk, not an in-memory blob.
-    const csvPath = path.join(os.tmpdir(), `nexusflow-e2e-${Date.now()}.csv`);
+    const csvPath = path.join(os.tmpdir(), `eivanta-e2e-${Date.now()}.csv`);
     const timestamp = Date.now();
     fs.writeFileSync(
       csvPath,

@@ -1,7 +1,23 @@
 "use client";
 
 import React, { useState } from "react";
-import { ShieldAlert, CheckCircle2, Loader2, X, Play } from "lucide-react";
+import { ShieldAlert, CheckCircle2, Loader2, X, Play, AlertTriangle } from "lucide-react";
+import { useClientId } from "./ClientContext";
+
+interface FlaggedItem {
+  tx_id: string;
+  amount: number;
+  category: string;
+  reason: string;
+}
+
+interface AuditReport {
+  total_transactions_audited: number;
+  flagged_count: number;
+  expense_breakdown_by_category: Record<string, number>;
+  flagged_items: FlaggedItem[];
+  audit_status: string;
+}
 
 interface InteractiveAuditModalProps {
   isOpen: boolean;
@@ -11,35 +27,39 @@ interface InteractiveAuditModalProps {
 export default function InteractiveAuditModal({ isOpen, onClose }: InteractiveAuditModalProps) {
   const [auditing, setAuditing] = useState(false);
   const [auditComplete, setAuditComplete] = useState(false);
-  const [auditResults, setAuditResults] = useState<any[]>([]);
+  const [report, setReport] = useState<AuditReport | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  let currentClientId = "default_client";
+  let authToken: string | null = null;
+  try {
+    const clientCtx = useClientId() as any;
+    if (clientCtx && clientCtx.clientId) currentClientId = clientCtx.clientId;
+    authToken = clientCtx?.authToken ?? null;
+  } catch (e) {}
 
   if (!isOpen) return null;
 
   const runAudit = async () => {
     setAuditing(true);
     setAuditComplete(false);
+    setErrorMsg(null);
     try {
-      const res = await fetch("http://localhost:8000/api/v1/finance/comptroller-audit", {
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+      const res = await fetch(`${backendUrl}/api/v1/finance/comptroller-audit`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          transactions: [
-            { id: "tx_01", amount: 1250.0, category: "Infrastructure", vendor: "AWS Cloud" },
-            { id: "tx_02", amount: 450.0, category: "SaaS", vendor: "OpenAI API" },
-            { id: "tx_03", amount: 8900.0, category: "Consulting", vendor: "External Dev" }
-          ]
-        })
+        headers: {
+          "Content-Type": "application/json",
+          "x-client-id": currentClientId,
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
       });
-      const data = await res.json();
-      setAuditResults([
-        { check: "Zero-Trust Boundary Check", status: "PASSED", details: "All transactions verified within tenant scope." },
-        { check: "Spike Anomaly Detection", status: "PASSED", details: "No outlier expenditures detected above 3 std dev." },
-        { check: "Comptroller AI Review", status: "COMPLETED", details: JSON.stringify(data, null, 2) }
-      ]);
+      if (!res.ok) throw new Error(`Server status: ${res.status}`);
+      const data: AuditReport = await res.json();
+      setReport(data);
     } catch (err) {
-      setAuditResults([
-        { check: "Comptroller Connection", status: "FAILED", details: "Could not reach backend audit service." }
-      ]);
+      setErrorMsg("Could not reach the ledger audit service. Try again in a moment.");
+      setReport(null);
     } finally {
       setAuditing(false);
       setAuditComplete(true);
@@ -68,7 +88,7 @@ export default function InteractiveAuditModal({ isOpen, onClose }: InteractiveAu
         {/* Body */}
         <div className="p-6 space-y-4">
           <p className="text-xs text-slate-300">
-            Execute real-time anomaly detection, policy compliance checks, and transaction verification across active financial ledgers.
+            Pull this tenant's real ledger, total expenses by category, and flag any transaction whose amount is a statistical outlier within its category (z-score based).
           </p>
 
           {!auditComplete && !auditing && (
@@ -84,21 +104,79 @@ export default function InteractiveAuditModal({ isOpen, onClose }: InteractiveAu
           {auditing && (
             <div className="py-12 flex flex-col items-center justify-center gap-3 text-slate-400 font-mono text-xs">
               <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
-              <span>Scrubbing ledger and running AI compliance checks...</span>
+              <span>Scrubbing ledger and scoring anomalies...</span>
             </div>
           )}
 
-          {auditComplete && (
+          {auditComplete && errorMsg && (
+            <div className="py-8 flex flex-col items-center justify-center gap-3 text-rose-400 text-xs">
+              <AlertTriangle className="w-6 h-6" />
+              <span>{errorMsg}</span>
+              <button
+                onClick={runAudit}
+                className="mt-1 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs transition-all"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {auditComplete && report && (
             <div className="space-y-3">
-              {auditResults.map((res, i) => (
-                <div key={i} className="bg-slate-950 border border-slate-800 p-3.5 rounded-xl space-y-1 font-mono text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-200">{res.check}</span>
-                    <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-300 text-[10px] border border-emerald-800">{res.status}</span>
-                  </div>
-                  <pre className="text-[11px] text-slate-400 whitespace-pre-wrap">{res.details}</pre>
+              <div className="bg-slate-950 border border-slate-800 p-3.5 rounded-xl space-y-1 font-mono text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-200">Audit Summary</span>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] border ${
+                      report.flagged_count === 0
+                        ? "bg-emerald-950 text-emerald-300 border-emerald-800"
+                        : "bg-amber-950 text-amber-300 border-amber-800"
+                    }`}
+                  >
+                    {report.audit_status}
+                  </span>
                 </div>
-              ))}
+                <p className="text-slate-400">
+                  {report.total_transactions_audited} transactions audited &middot; {report.flagged_count} flagged
+                </p>
+              </div>
+
+              {Object.keys(report.expense_breakdown_by_category).length > 0 && (
+                <div className="bg-slate-950 border border-slate-800 p-3.5 rounded-xl space-y-1.5">
+                  <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Category Totals</p>
+                  {Object.entries(report.expense_breakdown_by_category).map(([cat, total]) => (
+                    <div key={cat} className="flex justify-between text-xs font-mono">
+                      <span className="text-slate-400">{cat}</span>
+                      <span className="text-white">${Number(total).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {report.flagged_items.length > 0 && (
+                <div className="bg-amber-950/30 border border-amber-800/60 rounded-xl p-3.5 space-y-2">
+                  <p className="text-[10px] font-bold text-amber-400 uppercase flex items-center gap-2">
+                    <ShieldAlert className="w-3.5 h-3.5" /> Flagged for Review
+                  </p>
+                  {report.flagged_items.map((item, i) => (
+                    <div key={i} className="bg-slate-950 border border-slate-800 p-2.5 rounded-lg text-xs">
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-300">{item.category}</span>
+                        <span className="font-bold text-amber-400 font-mono">${item.amount.toLocaleString()}</span>
+                      </div>
+                      <p className="text-slate-500 text-[11px] mt-0.5">{item.reason}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {report.total_transactions_audited === 0 && (
+                <div className="flex items-center gap-2 text-slate-500 text-xs py-2">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>No ledger data yet — upload a CSV ledger first to run a real audit.</span>
+                </div>
+              )}
+
               <button
                 onClick={runAudit}
                 className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs transition-all mt-2"

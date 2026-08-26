@@ -152,7 +152,7 @@ export default function SwarmLogStreamer({ sessionId = "active_dashboard_session
       <div className="flex items-center justify-between pb-4 border-b border-slate-800 mb-4">
         <div className="flex items-center gap-2">
           <Terminal className="w-5 h-5 text-indigo-400" />
-          <h3 className="text-sm font-semibold uppercase tracking-wider text-white">NexusFlow Live Swarm Telemetry</h3>
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-white">Eivanta Live Swarm Telemetry</h3>
         </div>
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : authFailed ? 'bg-rose-500' : 'bg-amber-500'}`}></span>

@@ -10,7 +10,7 @@ from backend.agents.virtual_cfo import generate_cfo_briefing
 #
 # 1. `db_path = "backend/nexus.db"` -- WRONG PATH. The real DuckDB file
 #    this whole application actually reads and writes is
-#    `db_manager.DB_PATH` (backend/nexusflow.duckdb). "backend/nexus.db"
+#    `db_manager.DB_PATH` (backend/eivanta.duckdb). "backend/nexus.db"
 #    is not that file -- on the real project disk it isn't even a .duckdb
 #    file at all, it's a leftover DIRECTORY of the same name, so the
 #    original script's `duckdb.connect(db_path, read_only=True)` could
@@ -27,7 +27,7 @@ from backend.agents.virtual_cfo import generate_cfo_briefing
 #    file does what its name says.
 # ------------------------------------------------------------------------
 
-print("--- NEXUSFLOW LEDGER DIAGNOSTIC TOOL ---")
+print("--- EIVANTA LEDGER DIAGNOSTIC TOOL ---")
 print(f"Connecting to real DB_PATH: {DB_PATH}")
 
 discovered_client_ids = []

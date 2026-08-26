@@ -25,7 +25,7 @@ except ImportError:
     from auth import verify_jwt_and_get_client_id
 
 router = APIRouter()
-logger = logging.getLogger("nexusflow.assumptions")
+logger = logging.getLogger("eivanta.assumptions")
 
 
 def _build_assumptions() -> dict:
@@ -44,7 +44,7 @@ def _build_assumptions() -> dict:
                 "description": (
                     "Cash runway (assumed_cash_reserves / burn_rate) uses this "
                     "PLACEHOLDER reserve figure, not a real bank balance -- "
-                    "NexusFlow has no bank/accounting integration to pull an "
+                    "Eivanta has no bank/accounting integration to pull an "
                     "actual cash position from yet. Every runway figure shown "
                     "anywhere is only as real as this number."
                 ),

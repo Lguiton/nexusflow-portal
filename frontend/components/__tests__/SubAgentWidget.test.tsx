@@ -10,6 +10,10 @@ function renderWithProvider(ui: React.ReactElement) {
 describe('SubAgentWidget', () => {
   beforeEach(() => {
     global.fetch = jest.fn();
+    // RBAC-01: ClientContext only auto-authenticates via a stored token
+    // (validated against /api/v1/auth/me) -- seed one here the same way
+    // the old dev-login mock used to fake an authenticated mount.
+    window.sessionStorage.setItem('nexus_access_token', 'test-token');
   });
 
   afterEach(() => {
@@ -18,8 +22,11 @@ describe('SubAgentWidget', () => {
 
   it('sends a real Authorization header on the swarm metrics request (regression check for the documented 401 bug)', async () => {
     (global.fetch as jest.Mock).mockImplementation((url: string, opts: any) => {
-      if (url.includes('/api/v1/auth/dev-login')) {
-        return Promise.resolve({ ok: true, json: async () => ({ access_token: 'test-token' }) });
+      if (url.includes('/api/v1/auth/me')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ user_id: 1, client_id: 'CLI-001', email: 'owner@test.example', role: 'owner' }),
+        });
       }
       if (url.includes('/api/v1/metrics/swarm')) {
         return Promise.resolve({
@@ -44,8 +51,11 @@ describe('SubAgentWidget', () => {
 
   it('stays at the real "--" placeholder (not a fabricated number) if the request fails', async () => {
     (global.fetch as jest.Mock).mockImplementation((url: string) => {
-      if (url.includes('/api/v1/auth/dev-login')) {
-        return Promise.resolve({ ok: true, json: async () => ({ access_token: 'test-token' }) });
+      if (url.includes('/api/v1/auth/me')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ user_id: 1, client_id: 'CLI-001', email: 'owner@test.example', role: 'owner' }),
+        });
       }
       return Promise.resolve({ ok: false, status: 401, json: async () => ({}) });
     });

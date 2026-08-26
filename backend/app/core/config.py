@@ -1,14 +1,14 @@
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "NexusFlow Analytics Core"
+    PROJECT_NAME: str = "Eivanta Core"
     API_V1_STR: str = "/api/v1"
     
     POSTGRES_SERVER: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "nexus_admin"
     POSTGRES_PASSWORD: str = "nexus_secure_password"
-    POSTGRES_DB: str = "nexusflow_core"
+    POSTGRES_DB: str = "eivanta_core"
 
     @property
     def ASYNC_DATABASE_URL(self) -> str:

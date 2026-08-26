@@ -18,7 +18,7 @@ except ImportError:
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
 
-logger = logging.getLogger("nexusflow.predictive_forecaster")
+logger = logging.getLogger("eivanta.predictive_forecaster")
 
 # AI-03: previously no explicit request timeout at all -- a hung OpenAI
 # request had no client-side bound and would block this agent's execution
@@ -334,7 +334,7 @@ def generate_forecast(client_id: str = "default_client") -> Dict[str, Any]:
     log_forecast_snapshot_sync(safe_client_id, periods[-1], trend["method"], trend["r_squared"], trend["forecast"])
 
     system_prompt = f"""
-    You are Agent #07, NexusFlow's Predictive Forecaster.
+    You are Agent #07, Eivanta's Predictive Forecaster.
     Tenant: {safe_client_id}
     Real computed data -> {len(periods)} months of history, total revenue: ${baseline_revenue:,.2f}, trend R-squared: {trend['r_squared']}, growth rate per month: {trend['growth_rate_pct_per_period']}%, projected next-quarter revenue: ${trend['projected_next_quarter_revenue']:,.2f}.
     Real revenue-risk signal (tenant-level, NOT customer churn) -> risk_level: {revenue_risk['risk_level']}, {revenue_risk['consecutive_declining_months']} consecutive declining month(s), recent trend {revenue_risk['recent_growth_rate_pct_per_month']}%/month vs overall {revenue_risk['overall_growth_rate_pct_per_month']}%/month, deceleration_detected: {revenue_risk['deceleration_detected']}.

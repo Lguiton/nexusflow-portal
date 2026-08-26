@@ -2,7 +2,7 @@
 DIFF-03: "What I don't know yet" panel.
 
 Surfaces REAL, currently-true limitations for a specific tenant -- every
-entry here reflects an actual gap in what NexusFlow can currently tell
+entry here reflects an actual gap in what Eivanta can currently tell
 this tenant, derived from the same cheap, non-LLM signals other endpoints
 already compute (get_ledger_chart_context, get_mrr_summary,
 get_forecast_accuracy). Deliberately never calls an LLM-backed agent
@@ -28,7 +28,7 @@ except ImportError:
     from auth import verify_jwt_and_get_client_id
 
 router = APIRouter()
-logger = logging.getLogger("nexusflow.gaps")
+logger = logging.getLogger("eivanta.gaps")
 
 # Structural gaps: real, disclosed platform limitations that hold for every
 # tenant today regardless of their data, because the underlying schema/

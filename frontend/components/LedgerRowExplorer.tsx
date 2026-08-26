@@ -3,6 +3,30 @@
 import { useCallback, useEffect, useState } from "react";
 import { Search, Loader2, AlertCircle, ListFilter } from "lucide-react";
 import { useClientId } from "./ClientContext";
+import TimeRangeSelector from "./TimeRangeSelector";
+
+// Track 5 (Global time-range selector): translates a preset id into a real
+// inclusive [date_from, date_to] pair the backend's date-range filter (see
+// backend/db_manager.get_ledger_rows) can use. "custom" returns nulls --
+// that falls through to the existing manual category/month inputs below,
+// which is what "Custom Range..." is for.
+function computeRangeDates(rangeId: string): { date_from: string | null; date_to: string | null } {
+  const toISODate = (d: Date) => d.toISOString().slice(0, 10);
+  const today = new Date();
+  switch (rangeId) {
+    case "30d": {
+      const from = new Date(today);
+      from.setDate(from.getDate() - 30);
+      return { date_from: toISODate(from), date_to: toISODate(today) };
+    }
+    case "q3-2026":
+      return { date_from: "2026-07-01", date_to: "2026-09-30" };
+    case "ytd":
+      return { date_from: `${today.getFullYear()}-01-01`, date_to: toISODate(today) };
+    default:
+      return { date_from: null, date_to: null };
+  }
+}
 
 // DIFF-01: evidence trail. Real drill-down into the exact ledger rows
 // behind a category/month via POST /api/v1/finance/ledger-rows -- every
@@ -39,6 +63,7 @@ export default function LedgerRowExplorer({ refreshTrigger = 0 }: LedgerRowExplo
 
   const [category, setCategory] = useState("");
   const [month, setMonth] = useState("");
+  const [rangeId, setRangeId] = useState("q3-2026");
   const [data, setData] = useState<LedgerRowsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +74,7 @@ export default function LedgerRowExplorer({ refreshTrigger = 0 }: LedgerRowExplo
     setError(null);
     try {
       const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+      const { date_from, date_to } = computeRangeDates(rangeId);
       const response = await fetch(`${backendUrl}/api/v1/finance/ledger-rows`, {
         method: "POST",
         headers: {
@@ -58,6 +84,8 @@ export default function LedgerRowExplorer({ refreshTrigger = 0 }: LedgerRowExplo
         body: JSON.stringify({
           category: category.trim() || null,
           month: month.trim() || null,
+          date_from,
+          date_to,
           limit: 50,
         }),
         signal,
@@ -75,7 +103,7 @@ export default function LedgerRowExplorer({ refreshTrigger = 0 }: LedgerRowExplo
         setLoading(false);
       }
     }
-  }, [authToken, authReady, category, month]);
+  }, [authToken, authReady, category, month, rangeId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -98,7 +126,13 @@ export default function LedgerRowExplorer({ refreshTrigger = 0 }: LedgerRowExplo
             <p className="text-xs text-slate-400">See the exact transactions behind any category or month</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <TimeRangeSelector
+            onRangeChange={(id) => {
+              setRangeId(id);
+              if (id !== "custom") setMonth("");
+            }}
+          />
           <input
             type="text"
             value={category}
@@ -110,8 +144,10 @@ export default function LedgerRowExplorer({ refreshTrigger = 0 }: LedgerRowExplo
             type="text"
             value={month}
             onChange={(e) => setMonth(e.target.value)}
+            disabled={rangeId !== "custom"}
+            title={rangeId !== "custom" ? "Switch Time Range to \"Custom Range...\" to set an exact month" : undefined}
             placeholder="YYYY-MM"
-            className="text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-slate-200 placeholder:text-slate-500 w-24"
+            className="text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-slate-200 placeholder:text-slate-500 w-24 disabled:opacity-40 disabled:cursor-not-allowed"
           />
           <button
             onClick={() => fetchRows()}
