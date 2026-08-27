@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import contextlib
 import glob
 import statistics
 import uuid
@@ -14,6 +15,7 @@ env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 from backend.db_manager import ingest_csv_to_db
 from backend.auth import verify_jwt_and_get_client_id, require_role, AuthenticatedUser
+from backend.rate_limit import check_ingestion_rate_limit
 def get_active_agent_count() -> int:
     try:
         agents_dir = os.path.join(os.path.dirname(__file__), 'agents')
@@ -23,7 +25,40 @@ def get_active_agent_count() -> int:
         return 0
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("eivanta.supervisor")
-app = FastAPI(title="Eivanta Backend - Hardened Enterprise Edition")
+
+# INT-01: the MCP read-only tool server's Streamable HTTP transport runs
+# its own internal task group (see backend/mcp_server.py's mcp_lifespan
+# docstring) that must be started via a real ASGI lifespan -- mounting the
+# sub-app with app.mount() alone does NOT do this. Resolved BEFORE the
+# FastAPI() call below so it can be passed as this app's own lifespan.
+# Same fail-closed-and-loud posture as every router import below: a
+# missing 'mcp' package (see requirements.txt) disables the /mcp mount
+# entirely, logged once here, rather than crashing the whole backend.
+_mcp_asgi_app = None
+_mcp_lifespan = None
+try:
+    from backend import mcp_server as _mcp_server_module
+    # A fresh FastMCP instance (and its matched asgi app + lifespan) is
+    # built HERE, once per import of this module -- not once per process
+    # -- so re-importing/reloading backend.main (as the real test suite's
+    # `app` fixture does per test) always gets its own never-yet-started
+    # session manager. See mcp_server.create_mcp_asgi_app_and_lifespan's
+    # own docstring for why a shared module-level singleton breaks this.
+    _mcp_asgi_app, _mcp_lifespan = _mcp_server_module.create_mcp_asgi_app_and_lifespan()
+except ImportError as e:
+    logger.error(f"MCP tool server unavailable (INT-01) -- is 'mcp' installed? {e}")
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    if _mcp_lifespan is not None:
+        async with _mcp_lifespan():
+            yield
+    else:
+        yield
+
+
+app = FastAPI(title="Eivanta Backend - Hardened Enterprise Edition", lifespan=_lifespan)
 try:
     from backend import accounts
     app.include_router(accounts.router)
@@ -59,6 +94,22 @@ try:
     app.include_router(categorization.router)
 except ImportError as e:
     logger.error(f"Failed to load categorization router: {e}")
+try:
+    from backend import api_keys
+    app.include_router(api_keys.router)
+except ImportError as e:
+    logger.error(f"Failed to load api_keys router: {e}")
+# INT-01: the actual MCP tool server mount -- a plain ASGI sub-app, not a
+# FastAPI router, so it's app.mount()-ed rather than include_router()-ed.
+# _mcp_asgi_app is None (with the reason already logged above) if the
+# 'mcp' package isn't installed; guarded the same fail-closed way as every
+# router include above rather than letting a missing optional dependency
+# crash startup.
+if _mcp_asgi_app is not None:
+    try:
+        app.mount("/mcp", _mcp_asgi_app)
+    except Exception as e:
+        logger.error(f"Failed to mount MCP tool server at /mcp: {e}")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8001", "http://127.0.0.1:8001"],
@@ -151,6 +202,12 @@ async def upload_ledger(
     user: AuthenticatedUser = Depends(require_role("owner", "admin", "member")),
 ):
     client_id = user.client_id
+    # DATA-06: enforced BEFORE any file I/O or DB work -- a tenant already
+    # over the limit shouldn't cost this server the price of a real
+    # ingestion attempt just to find that out. See rate_limit.py's own
+    # module docstring for why this is in-memory/per-process rather than
+    # DB-backed, and what upgrading it would take.
+    check_ingestion_rate_limit(client_id)
     safe_filename = Path(file.filename or "upload.csv").name
     temp_dir = Path("/tmp/eivanta_ingest")
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -263,19 +320,41 @@ async def get_kpi_summary(client_id: str = Depends(verify_jwt_and_get_client_id)
             sum(c["total_amount"] for c in context.get("category_breakdown", [])), 2
         )
         current_month_key = date.today().strftime("%Y-%m")
+        # BUG FIX (confirmed live 26 Aug 2026, founder-requested): this field used to
+        # read straight from context["monthly_totals"], which nets revenue and
+        # expense together for the month -- despite being labeled "Monthly Revenue"
+        # and captioned on the frontend as "total revenue this month". On this
+        # tenant's real test ledger that showed a NEGATIVE number for August
+        # ($-33,822.95) as "revenue", when actual August revenue was a positive
+        # $14,700. Now reads context["monthly_revenue_totals"] (amount > 0 only,
+        # same field added for the analytics-summary/chart fixes above), so this is
+        # real revenue math, not a net position mislabeled as revenue.
         monthly_revenue = next(
+            (m["total_amount"] for m in context.get("monthly_revenue_totals", []) if m["month"] == current_month_key),
+            0.0,
+        )
+        # Real math, not a guess: net position for the month (from monthly_totals,
+        # which IS revenue+expense combined -- that's what "net" means) minus real
+        # revenue gives real expense for the same month. All three numbers are
+        # derived directly from this tenant's own ledger rows, nothing assumed.
+        monthly_net = next(
             (m["total_amount"] for m in context.get("monthly_totals", []) if m["month"] == current_month_key),
             0.0,
         )
+        monthly_expense = round(monthly_revenue - monthly_net, 2)
         return {
             "ledger_total_amount": ledger_total_amount,
             "ledger_row_count": context.get("row_count", 0),
-            # Labeled honestly as "Monthly Revenue", not "MRR" -- this is
-            # simply ALL transactions (recurring or not) for the current
-            # month, net of nothing. Kept as-is for anyone already reading
-            # it; the real MRR fields below are the FIN-01 addition.
+            # Labeled "Monthly Revenue" and now IS real revenue -- current month's
+            # rows with amount > 0 only, no expenses netted in. monthly_expense and
+            # monthly_net_profit below are the same-month breakdown so the frontend
+            # can show real revenue/expense/net together instead of one ambiguous
+            # number; the real MRR fields further below are the separate FIN-01
+            # addition (recurring-flagged rows only, not the same thing as this).
             "monthly_revenue": monthly_revenue,
             "monthly_revenue_label": "Monthly Revenue",
+            "monthly_expense": monthly_expense,
+            "monthly_net_profit": round(monthly_net, 2),
             "revenue_month": current_month_key,
             # FIN-01: real Monthly Recurring Revenue -- computed ONLY from
             # transactions this tenant explicitly flagged recurring on
@@ -488,6 +567,29 @@ async def get_forecast(client_id: str = Depends(enforce_budget_gate)):
     except Exception as e:
         logger.error(f"Forecaster Error: {e}")
         raise HTTPException(status_code=502, detail="Forecast generation failed. Please try again.")
+
+
+class ScenarioRequest(BaseModel):
+    scenario_type: str = Field(..., description="One of: price_change_pct, new_hire_monthly_cost, churned_account_monthly_revenue")
+    amount: float = Field(..., description="price_change_pct: a +/- percentage. new_hire_monthly_cost / churned_account_monthly_revenue: a dollar amount (sign ignored -- always treated as a cost/loss).")
+    cash_reserves: Optional[float] = Field(None, ge=0, description="Optional override of the assumed cash reserve used for the runway figure. Omit to use the platform-wide assumed reserve (see the Assumption Ledger).")
+
+
+@app.post("/api/v1/predictive/scenario")
+async def run_scenario_endpoint(req: ScenarioRequest, client_id: str = Depends(verify_jwt_and_get_client_id)):
+    try:
+        from backend.agents.scenario_modeler import run_scenario
+        result = await run_scenario(client_id, req.scenario_type, req.amount, req.cash_reserves)
+        if result.get("status") == "ERROR":
+            raise HTTPException(status_code=400, detail="; ".join(result.get("insights", ["Invalid scenario request."])))
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Scenario Modeler Error: {e}")
+        raise HTTPException(status_code=502, detail="Scenario modeling failed. Please try again.")
+
+
 @app.get("/api/v1/finance/forecast-accuracy")
 async def get_forecast_accuracy_endpoint(client_id: str = Depends(verify_jwt_and_get_client_id)):
     # FIN-04: backtesting -- compares every forecast this tenant has ever
@@ -587,6 +689,36 @@ async def get_stakeholder_report(client_id: str = Depends(enforce_budget_gate)):
     except Exception as e:
         logger.error(f"Report Generator Error: {e}")
         raise HTTPException(status_code=502, detail="Stakeholder report generation failed. Please try again.")
+
+
+class TelemetryScoutRequest(BaseModel):
+    # Real, user-supplied sample from an external API/webhook -- the same
+    # shape /api/search already accepts (see SearchRequest.sample_payload)
+    # and forwards to this exact agent via orchestrator.py's keyword
+    # routing. This dedicated endpoint exists precisely because that route
+    # requires guessing the right trigger phrase in a free-text query; a
+    # tenant using this real UI entry point (TelemetryScoutCard.tsx) never
+    # has to know the routing keywords at all.
+    sample_payload: Union[str, dict, list] = Field(..., description="A representative JSON sample (object, or array of objects) from the external API/webhook to map.")
+    query: str = Field("", max_length=2000, description="Optional context for the LLM commentary layer -- purely descriptive, never used to alter the deterministic schema mapping itself.")
+
+
+@app.post("/api/v1/telemetry/map-schema")
+async def map_external_telemetry_schema(req: TelemetryScoutRequest, client_id: str = Depends(enforce_budget_gate)):
+    try:
+        from backend.agents.external_telemetry_scout import execute_task
+        result = await asyncio.to_thread(execute_task, client_id, req.query, req.sample_payload)
+        if result.get("status") == "ERROR":
+            # A real, expected validation outcome (malformed/empty JSON) --
+            # not a server fault, so this stays a 400, not the 502 used
+            # below for genuine agent/infra failures.
+            raise HTTPException(status_code=400, detail="; ".join(result.get("insights", ["Invalid sample payload."])))
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"External Telemetry Scout Error: {e}")
+        raise HTTPException(status_code=502, detail="Schema mapping failed. Please try again.")
 
 
 # ---------------------------------------------------------------------------

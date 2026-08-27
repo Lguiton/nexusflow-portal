@@ -47,6 +47,12 @@ os.environ.setdefault("JWT_ALGORITHM", "HS256")
 # (those are out of scope here -- see test_agent_endpoints_require_auth.py
 # for why), so this key is never actually used to authenticate anything.
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-placeholder-not-a-real-key")
+# AUTH-04 (MFA) reuses backend/byok.py's encrypt_secret/decrypt_secret to
+# encrypt TOTP secrets at rest, which lazily requires BYOK_ENCRYPTION_KEY
+# to be set (see byok.py's _get_fernet) -- a real, fixed-for-this-suite
+# Fernet key, generated once for testing only, never the real deployed
+# key from backend/.env (which this conftest deliberately never reads).
+os.environ.setdefault("BYOK_ENCRYPTION_KEY", "-q952Kq64VhGlNJyBQv_sVaiYf7UHBWX-HRakY7mM1w=")
 
 import pytest
 

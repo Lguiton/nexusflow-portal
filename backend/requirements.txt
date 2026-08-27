@@ -19,3 +19,28 @@ openpyxl
 xlrd
 pdfplumber
 qdrant-client
+# INT-01: pinned below mcp 2.0. mcp_server.py is built against the v1
+# `mcp.server.fastmcp.FastMCP` API (streamable_http_path, stateless_http,
+# session_manager.run() as an async context manager). mcp 2.0 (released
+# after this integration was originally built) renamed that class to
+# MCPServer and changed its construction/mounting API -- confirmed live
+# 27 Aug 2026: an unpinned `pip install mcp` now resolves to 2.1.1, whose
+# mcp.server.fastmcp module raises ModuleNotFoundError on import by
+# design, with its own migration-guide URL, specifically to fail loudly
+# instead of silently behaving differently. main.py's own try/except
+# around the mcp_server import already fails CLOSED on this (logs an
+# error, /mcp simply isn't mounted, the rest of the app is unaffected) --
+# but "the feature silently doesn't exist" is not the same as "the
+# feature works", so the real fix is this pin, not just tolerating the
+# fallback. Re-verified end-to-end (real uvicorn + real mcp client) against
+# 1.29.1 after this pin -- see backend/tools/verify_mcp_server.py.
+mcp<2
+# AUTH-04: TOTP-based MFA. pyotp generates/verifies real RFC 6238 codes;
+# qrcode[pil] renders the enrollment QR server-side as a PNG (the [pil]
+# extra pulls in Pillow, which this project did not otherwise depend on --
+# qrcode's default PNG image factory needs it, and .make_image() raises
+# without it). No SMS/email dependency either way -- this is deliberately
+# an authenticator-app-only second factor, so it isn't blocked on the
+# founder's still-pending email/SMS provider accounts.
+pyotp<3
+qrcode[pil]<8

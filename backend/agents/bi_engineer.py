@@ -5,14 +5,17 @@ import asyncio
 import duckdb
 from typing import Dict, Any, List, Optional, Tuple
 from dotenv import load_dotenv
-from openai import OpenAI
 
 try:
-    from backend.db_manager import DB_PATH, log_query_audit, get_db_lock, log_ai_usage_sync
+    from backend import db_manager
+    from backend.db_manager import log_query_audit, get_db_lock, log_ai_usage_sync
     from backend.model_registry import get_model
+    from backend.byok import get_openai_client_for_tenant_sync
 except ImportError:
-    from db_manager import DB_PATH, log_query_audit, get_db_lock, log_ai_usage_sync
+    import db_manager
+    from db_manager import log_query_audit, get_db_lock, log_ai_usage_sync
     from model_registry import get_model
+    from byok import get_openai_client_for_tenant_sync
 
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
@@ -24,8 +27,14 @@ logger = logging.getLogger("eivanta.bi_engineer")
 AI_REQUEST_TIMEOUT_SECONDS = 30.0
 AI_MAX_RETRIES = 2
 
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key, timeout=AI_REQUEST_TIMEOUT_SECONDS, max_retries=AI_MAX_RETRIES) if api_key else None
+# BYOK-01: this used to be a single module-level client built once from the
+# platform's own OPENAI_API_KEY at import time -- fine when every tenant
+# shares the platform key, but incapable of ever routing to a tenant's own
+# key. platform_api_key is kept as the fallback; the actual client is now
+# built per-call (in both _ask_llm_for_query_intent and generate_bi_summary
+# below) via get_openai_client_for_tenant_sync, which uses the calling
+# tenant's BYOK key when they've configured one.
+platform_api_key = os.getenv("OPENAI_API_KEY")
 
 
 # ==============================================================================
@@ -126,6 +135,7 @@ def _ask_llm_for_query_intent(client_id: str, query: str) -> Optional[dict]:
     outright; the returned shape is validated separately by
     _validate_intent, which does not trust this function's output either.
     """
+    client = get_openai_client_for_tenant_sync(client_id, platform_api_key, AI_REQUEST_TIMEOUT_SECONDS, AI_MAX_RETRIES)
     if not client:
         return None
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
@@ -337,7 +347,7 @@ def _answer_data_question(client_id: str, query: str) -> Dict[str, Any]:
     lock = get_db_lock()
     try:
         with lock:
-            conn = duckdb.connect(DB_PATH, read_only=True)
+            conn = duckdb.connect(db_manager.DB_PATH, read_only=True)
             try:
                 result = conn.execute(sql, params)
                 columns = [d[0] for d in result.description]
@@ -494,14 +504,14 @@ def generate_bi_summary(
     # FIXED: previously an unprotected, unsynchronized connection -- now
     # serialized through db_manager.py's shared lock, same as every other
     # DB access in this codebase.
-    if os.path.exists(DB_PATH):
+    if os.path.exists(db_manager.DB_PATH):
         lock = get_db_lock()
         with lock:
             conn = None
             try:
-                conn = duckdb.connect(DB_PATH, read_only=True)
+                conn = duckdb.connect(db_manager.DB_PATH, read_only=True)
             except Exception as e:
-                logger.error(f"Failed to open DuckDB at {DB_PATH}: {e}")
+                logger.error(f"Failed to open DuckDB at {db_manager.DB_PATH}: {e}")
                 db_failed = True
                 failure_reason = f"database connection failed: {e}"
 
@@ -569,6 +579,7 @@ def generate_bi_summary(
     Respond STRICTLY in JSON: {{"insights": ["...", "...", "..."]}}
     """
     try:
+        client = get_openai_client_for_tenant_sync(client_id, platform_api_key, AI_REQUEST_TIMEOUT_SECONDS, AI_MAX_RETRIES)
         if not client:
             raise ValueError("OpenAI client not initialized.")
         model = get_model("bi_engineer_distribution")

@@ -24,6 +24,11 @@ try:
 except ImportError:
     from auth import verify_jwt_and_get_client_id
 
+try:
+    from backend import accounts
+except ImportError:
+    import accounts
+
 router = APIRouter()
 logger = logging.getLogger("eivanta.assumptions")
 
@@ -40,13 +45,15 @@ def _build_assumptions() -> dict:
                 "label": "Assumed Cash Reserves",
                 "value": virtual_cfo.ASSUMED_CASH_RESERVES,
                 "unit": "usd",
-                "used_by": "Virtual CFO -- Cash Runway",
+                "used_by": "Virtual CFO -- Cash Runway; Scenario Modeler -- baseline & projected runway (overridable per request via cash_reserves)",
                 "description": (
                     "Cash runway (assumed_cash_reserves / burn_rate) uses this "
                     "PLACEHOLDER reserve figure, not a real bank balance -- "
                     "Eivanta has no bank/accounting integration to pull an "
                     "actual cash position from yet. Every runway figure shown "
-                    "anywhere is only as real as this number."
+                    "anywhere is only as real as this number, unless a caller "
+                    "explicitly overrides it (Scenario Modeler's cash_reserves "
+                    "parameter is the one place that's currently possible)."
                 ),
             },
             {
@@ -95,6 +102,19 @@ def _build_assumptions() -> dict:
                 "unit": "consecutive declining months",
                 "used_by": "Predictive Forecaster -- Revenue-Risk Proxy",
                 "description": "This many consecutive declining months is flagged ELEVATED risk.",
+            },
+            {
+                "key": "login_lockout_policy",
+                "label": "Login Lockout Policy (AUTH-05)",
+                "value": f"{accounts.MAX_FAILED_LOGIN_ATTEMPTS} attempts / {accounts.LOGIN_LOCKOUT_MINUTES} min",
+                "unit": "attempts / minutes",
+                "used_by": "Login (POST /api/v1/auth/login)",
+                "description": (
+                    "This many consecutive wrong-password attempts against a real "
+                    "account locks it for this many minutes. A moderate starting "
+                    "default, not yet tuned against real attack traffic (none "
+                    "exists for this product yet) -- revisit once it does."
+                ),
             },
             {
                 "key": "materially_declining_pct",

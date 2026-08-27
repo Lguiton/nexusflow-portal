@@ -5,6 +5,8 @@ import ETLDropzone from "../ETLDropzone";
 import LedgerRowExplorer from "../LedgerRowExplorer";
 import CategorySuggestionsWidget from "../CategorySuggestionsWidget";
 import ExportActionBar from "../ExportActionBar";
+import TelemetryScoutCard from "../TelemetryScoutCard";
+import IngestionHistoryCard from "../IngestionHistoryCard";
 import { useClientId } from "../ClientContext";
 
 interface LedgerViewProps {
@@ -71,6 +73,10 @@ export default function LedgerView({ refreshTrigger, onUploadSuccess, onApplied 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <LedgerRowExplorer refreshTrigger={refreshTrigger} />
         <CategorySuggestionsWidget refreshTrigger={refreshTrigger} onApplied={onApplied} />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <IngestionHistoryCard refreshTrigger={refreshTrigger} onDataChanged={onUploadSuccess} />
+        <TelemetryScoutCard />
       </div>
     </div>
   );

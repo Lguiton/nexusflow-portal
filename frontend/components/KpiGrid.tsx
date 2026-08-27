@@ -24,6 +24,8 @@ interface KpiSummary {
   ledger_row_count: number;
   monthly_revenue: number;
   monthly_revenue_label: string;
+  monthly_expense: number;
+  monthly_net_profit: number;
   revenue_month: string;
 }
 
@@ -140,8 +142,25 @@ export default function KpiGrid({ refreshTrigger = 0 }: KpiGridProps) {
             <>
               <p className="text-2xl font-bold text-white">{formatCurrency(data?.monthly_revenue ?? 0)}</p>
               <p className="text-xs text-slate-500 mt-1">
-                {data?.revenue_month ?? ""} -- total revenue this month, not a recurring-revenue figure
+                {data?.revenue_month ?? ""} -- real revenue only (amount &gt; 0 rows), not a recurring-revenue figure
               </p>
+              {/* Real math from this tenant's own ledger rows, same month: expense
+                  and net profit shown alongside revenue so the number above can't be
+                  misread as a net position -- see backend/main.py's kpi-summary fix
+                  (26 Aug 2026) for why this used to show a net figure mislabeled as
+                  revenue. */}
+              <div className="flex items-center gap-4 mt-2 pt-2 border-t border-slate-800">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-500">Expenses</p>
+                  <p className="text-sm font-semibold text-rose-400">{formatCurrency(data?.monthly_expense ?? 0)}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-500">Net Profit</p>
+                  <p className={`text-sm font-semibold ${(data?.monthly_net_profit ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {formatCurrency(data?.monthly_net_profit ?? 0)}
+                  </p>
+                </div>
+              </div>
             </>
           )}
         </div>

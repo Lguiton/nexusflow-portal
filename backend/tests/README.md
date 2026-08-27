@@ -59,17 +59,49 @@ pytest backend/tests -v
   (cognitive search, CFO briefing, forecast, BI summary, schema audit,
   SaaS strategy, chart suite, stakeholder report) rejects a request with
   no/invalid auth *before* ever reaching the agent call.
+- `test_orchestrator_integration.py` — the LangGraph multi-agent router
+  (`backend/agents/orchestrator.py`), previously exercised by NOTHING in
+  this suite. Three layers: (1) `router_node`'s keyword dispatch table,
+  every route plus the unmatched-query fallback to `virtual_cfo`, pure and
+  deterministic; (2) `route_query()` through the real compiled graph
+  against a real empty tenant, for several different routes, with zero
+  network calls (every routed agent's own no-data guard returns before it
+  would ever build an OpenAI client); (3) one real success-path test with
+  real seeded ledger data where *only* the OpenAI network boundary is
+  stubbed (same spy-client pattern as `tools/verify_byok_rollout.py`),
+  proving the full router → graph node → real agent business logic → back
+  through `route_query()`'s response-shaping wiring for a genuine success
+  case too.
+- `test_live_openai_agents_opt_in.py` — **opt-in, skipped by default.**
+  The migrated, assertion-based replacement for four ad hoc root-level
+  diagnostic scripts this repo used to carry (`test_agents.py`,
+  `test_backbone.py`, `test_cfo_direct.py`, `test_db_manager_live.py`) —
+  scripts with no `def test_*` functions that pytest never actually
+  collected, meant to be run by hand and read by eye. `test_db_manager_
+  live.py`'s checks are now fully superseded by `test_db_manager_queries.py`
+  above and were not migrated; the other three scripts' unique value (real
+  agent business logic against a real, currently-billed OpenAI call) is
+  preserved here as real tests, gated behind
+  `EIVANTA_RUN_LIVE_OPENAI_TESTS=1` plus a real `OPENAI_API_KEY` so a bare
+  `pytest backend/tests` never spends money or needs a real key. See that
+  file's own module docstring for exactly which old script each test
+  replaces and why (including two real bugs those old scripts had — a
+  nonexistent `code_customizer` import and a wrong keyword argument on
+  `orchestrator.route_query` — that this migration fixed rather than
+  carried forward).
 
 ## What's deliberately NOT covered here
 
 Real LLM output from the 8 OpenAI-backed agents (virtual_cfo, bi_engineer,
-predictive_forecaster, etc.) isn't exercised end-to-end — that would mean
-a real, billed OpenAI API call per test run, with non-deterministic output
-to assert against. What's tested instead is that every such endpoint's
-auth gate runs before the agent is ever invoked. If real end-to-end agent
-testing is wanted later, it belongs in its own explicitly opt-in suite
-(e.g. gated behind an env var), not mixed into the suite that runs on
-every `pytest` invocation.
+predictive_forecaster, etc.) isn't exercised end-to-end in the DEFAULT
+suite — that would mean a real, billed OpenAI API call per test run, with
+non-deterministic output to assert against. What's tested by default
+instead is that every such endpoint's auth gate runs before the agent is
+ever invoked (`test_agent_endpoints_require_auth.py`), and that the full
+orchestration pipeline is wired correctly with the OpenAI network boundary
+stubbed (`test_orchestrator_integration.py`). Real, live-API coverage does
+exist now, explicitly opt-in rather than mixed into the suite that runs on
+every `pytest` invocation — see `test_live_openai_agents_opt_in.py` above.
 
 Qdrant isn't tested either — as of this pass, nothing in `backend/` (agents,
 routers, or `db_manager.py`) actually imports or calls a Qdrant client, so

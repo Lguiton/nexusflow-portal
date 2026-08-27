@@ -33,6 +33,18 @@ def test_every_registered_agent_has_a_changelog_entry():
 def test_changelog_entries_reference_only_currently_pinned_or_historical_models():
     """Every changelog entry's model string should be a real, plausible
     model identifier -- catches an obvious typo (e.g. 'gtp-4o') in a
-    manually-maintained log."""
+    manually-maintained log.
+
+    FIXED 2026-08-26: this used to assert startswith("gpt-") unconditionally,
+    which was true only as long as every registered agent was a chat model.
+    It started failing for a real, legitimate entry the moment
+    "knowledge_base_embedding" (backing app/core/rag.py's persistent vector
+    RAG) was registered with "text-embedding-3-small" -- a real OpenAI
+    embedding model, not a typo. Broadened to a whitelist of real OpenAI
+    model-family prefixes instead of narrowing back to chat-only, so this
+    still catches an actual typo (e.g. "gtp-4o", "text-embeding-3-small")
+    without breaking every time a legitimate non-chat model is added.
+    """
+    valid_prefixes = ("gpt-", "o1-", "o3-", "text-embedding-")
     for entry in model_registry.REGISTRY_CHANGELOG:
-        assert entry["model"].startswith("gpt-"), f"Suspicious model string in changelog: {entry}"
+        assert entry["model"].startswith(valid_prefixes), f"Suspicious model string in changelog: {entry}"

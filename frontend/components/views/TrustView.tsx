@@ -7,6 +7,10 @@ import BYOKSettingsCard from "../BYOKSettingsCard";
 import KnowledgeBaseCard from "../KnowledgeBaseCard";
 import FinOpsBudgetCard from "../FinOpsBudgetCard";
 import AuditLineageCard from "../AuditLineageCard";
+import McpApiKeysCard from "../McpApiKeysCard";
+import TenantLifecycleCard from "../TenantLifecycleCard";
+import MfaSettingsCard from "../MfaSettingsCard";
+import SessionsCard from "../SessionsCard";
 
 interface TrustViewProps {
   refreshTrigger: number;
@@ -26,6 +30,14 @@ export default function TrustView({ refreshTrigger }: TrustViewProps) {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <FinOpsBudgetCard />
         <AuditLineageCard />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <McpApiKeysCard />
+        <TenantLifecycleCard />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <MfaSettingsCard />
+        <SessionsCard />
       </div>
     </div>
   );

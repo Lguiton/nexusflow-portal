@@ -7,6 +7,23 @@ import { useClientId } from "./ClientContext";
 interface CFOPayload {
   metrics: { gross_margin: number; burn_rate: number; cash_runway_months: number; };
   insights: string[];
+  // FIN-02/FIN-03: metrics are now scoped to one real calendar month (the
+  // tenant's most recently completed month with ledger data), not a
+  // lifetime-to-date sum -- reporting_month ("YYYY-MM") is surfaced in the
+  // header so that scope is visible, not silently assumed by the viewer.
+  reporting_month?: string | null;
+}
+
+// "2026-07" -> "July 2026". Falls back to the raw string if it doesn't
+// parse cleanly -- never hide the month behind a blank label.
+function formatReportingMonth(reportingMonth: string): string {
+  const match = /^(\d{4})-(\d{2})$/.exec(reportingMonth);
+  if (!match) return reportingMonth;
+  const [, yearStr, monthStr] = match;
+  const monthIndex = parseInt(monthStr, 10) - 1;
+  const date = new Date(parseInt(yearStr, 10), monthIndex, 1);
+  if (Number.isNaN(date.getTime())) return reportingMonth;
+  return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 }
 
 export default function VirtualCFOWidget({ refreshTrigger = 0, onNavigateToLedger }: { refreshTrigger?: number; onNavigateToLedger?: () => void }) {
@@ -102,7 +119,11 @@ export default function VirtualCFOWidget({ refreshTrigger = 0, onNavigateToLedge
             <h2 className="text-lg font-bold text-white flex items-center gap-2">
               Virtual CFO Briefing
             </h2>
-            <p className="text-xs text-slate-400">AI-generated executive financial summary</p>
+            <p className="text-xs text-slate-400">
+              {data?.reporting_month
+                ? `Executive financial summary for ${formatReportingMonth(data.reporting_month)}`
+                : 'AI-generated executive financial summary'}
+            </p>
           </div>
         </div>
 

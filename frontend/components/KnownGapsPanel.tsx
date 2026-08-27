@@ -56,7 +56,14 @@ export default function KnownGapsPanel({ refreshTrigger = 0 }: KnownGapsPanelPro
     } catch (err: any) {
       if (err.name === "AbortError") return;
       console.error("Known-gaps fetch failed:", err);
-      setError(err.message || "Unable to load known limitations right now.");
+      // FIXED (real raw-error UI leak, confirmed live 2026-08-26 via the
+      // real Jest suite -- same bug class already fixed in the Live Swarm
+      // Telemetry panel, and in AssumptionLedger.tsx just above in this
+      // same pass): err.message was always truthy (set from the throw
+      // above), so the friendly fallback here was dead code -- every real
+      // failure showed the raw HTTP status to the user. The technical
+      // message is still logged via console.error just above.
+      setError("Unable to load known limitations right now.");
     } finally {
       if (!signal?.aborted) {
         setLoading(false);

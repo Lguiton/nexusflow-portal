@@ -69,7 +69,16 @@ export default function AssumptionLedger() {
     } catch (err: any) {
       if (err.name === "AbortError") return;
       console.error("Assumption ledger fetch failed:", err);
-      setError(err.message || "Assumption ledger is currently unavailable.");
+      // FIXED (real raw-error UI leak, confirmed live 2026-08-26 via the
+      // real Jest suite -- same bug class already fixed in the Live Swarm
+      // Telemetry panel): this used to be `err.message || "<friendly
+      // text>"`. err.message is set from the throw above
+      // ("Assumption ledger request failed: 500"), which is truthy, so
+      // the friendly fallback was dead code -- every real failure showed
+      // the raw HTTP status to the user instead. The technical message is
+      // still logged via console.error just above; only the user-facing
+      // state is now always the translated message.
+      setError("Assumption ledger is currently unavailable.");
     } finally {
       if (!signal?.aborted) {
         setLoading(false);

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Search, Waypoints, Database, BarChart3, ShieldCheck, LayoutDashboard, X, ArrowRight } from "lucide-react";
+import { Search, Waypoints, Database, BarChart3, ShieldCheck, LayoutDashboard, Zap, X, ArrowRight } from "lucide-react";
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -31,15 +31,16 @@ export default function CommandPalette({ isOpen, onClose, onSelectAction }: Comm
   if (!isOpen) return null;
 
   // ids match AppShell's ViewId ("overview" | "analytics" | "ledger" |
-  // "swarm" | "trust") -- this used to list a placeholder action set
-  // (sql-lab, fleet, settings) that didn't correspond to anything real in
-  // the app. Now every action navigates to a real section.
+  // "swarm" | "trust" | "onetap") -- this used to list a placeholder action
+  // set (sql-lab, fleet, settings) that didn't correspond to anything real
+  // in the app. Now every action navigates to a real section.
   const actions = [
     { id: "overview", label: "Go to Overview", category: "Navigation", icon: LayoutDashboard },
     { id: "analytics", label: "Go to Analytics", category: "Navigation", icon: BarChart3 },
     { id: "ledger", label: "Go to Ledger & Data", category: "Navigation", icon: Database },
     { id: "swarm", label: "Open Live Swarm Telemetry", category: "Navigation", icon: Waypoints },
     { id: "trust", label: "Go to Trust & Gaps", category: "Navigation", icon: ShieldCheck },
+    { id: "onetap", label: "Go to One-Tap Insights", category: "Navigation", icon: Zap },
   ];
 
   const filteredActions = actions.filter(action =>

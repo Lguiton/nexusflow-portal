@@ -6,15 +6,25 @@ logger = logging.getLogger("eivanta.registry")
  
 # Explicit list of mandatory enterprise agent module paths.
 #
-# OPEN QUESTION: the project debrief describes a 13-agent roster
-# (Orchestrator #00 through External Telemetry Scout #12). 8 are tracked
-# here. Schema Mapper (#03) is CONFIRMED not built as a separate module --
-# its documented responsibility (DuckDB indexing, tenant isolation at the
-# DB layer) is instead covered by db_manager.py directly. Ingestion Engine
-# (#01), Data Analyst (#04), BI Visualization Architect (#11), and External
-# Telemetry Scout (#12) remain unconfirmed either way. Worth resolving
-# deliberately rather than letting "registered_agents" quietly imply a
-# headcount that isn't real.
+# RESOLVED (26 Aug 2026): BI Visualization Architect (#11) and External
+# Telemetry Scout (#12) -- previously left off this list as an open
+# question -- are confirmed real, live-routed nodes in orchestrator.py's
+# workflow graph (both modules parse cleanly and have real execute
+# functions wired into real keyword-based routing, not stubs), so both
+# are added below. Schema Mapper (#03) remains correctly absent: its
+# documented responsibility (DuckDB indexing, tenant isolation at the DB
+# layer) is covered by db_manager.py directly, not a separate module.
+# Ingestion Engine (#01) is likewise folded into db_manager.py. Data
+# Analyst (#04) is retired -- its duties were absorbed by BI Engineer
+# (#05).
+#
+# INDUCTED (27 Aug 2026, founder decision): Scenario Modeler (#14) added
+# below. It was rebuilt from a hardcoded stub into a real what-if
+# simulator this same week (see backend/agents/scenario_modeler.py's own
+# header comment for that correction) and is now the platform's 13th
+# named specialist -- the roster is Orchestrator (#00) + 13 specialists,
+# 14 total, up from the prior 13. 0 of 14 roster agents remain
+# unconfirmed as of this update.
 EXPECTED_AGENTS: List[str] = [
     "backend.agents.orchestrator",
     "backend.agents.virtual_cfo",
@@ -24,8 +34,11 @@ EXPECTED_AGENTS: List[str] = [
     "backend.agents.saas_strategist",
     "backend.agents.report_generator",
     "backend.agents.ops_shield",
+    "backend.agents.bi_visualization_architect",
+    "backend.agents.external_telemetry_scout",
+    "backend.agents.scenario_modeler",
     # sop_manager intentionally removed -- retired, not part of the
-    # canonical 13-agent roster. Its compliance-audit function always
+    # canonical 14-agent roster. Its compliance-audit function always
     # returned "CERTIFIED" regardless of actual system state (including in
     # its own error-fallback path), so it wasn't providing a real check that
     # needed replacing.

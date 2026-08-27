@@ -87,6 +87,28 @@ and paste back whatever comes out -- if anything fails, I'll fix it.
   fix. It also asserts the `"No ledger data yet"` known-gap is gone
   afterward, proving `dashboardRefreshTrigger` really propagated the
   upload into `KnownGapsPanel`'s next fetch.
+- **`one-tap-view.spec.ts` (added 2026-08-26)** -- Task 58 (UX-06), the
+  only feature added since the two specs above that had zero E2E coverage:
+  navigating to the "One-Tap Insights" view renders all six buttons;
+  tapping "Show me my numbers" renders a real authenticated dollar figure
+  (regression check for the same "no Authorization header -> 401" bug
+  class as `SubAgentWidget`/`ETLDropzone`, this time on `OneTapView`'s own
+  POST requests) and collapses cleanly on a second tap; and "View full
+  analytics" really navigates to the Analytics view rather than being a
+  dead link.
+
+  Same real-backend/real-DuckDB/shared-CLI-001-tenant tradeoff as the two
+  specs above (see "A real tradeoff worth knowing about" below) -- I
+  write-verified this one the same way (traced every assertion against the
+  real `AppShell.tsx`/`OneTapView.tsx` DOM structure, confirmed the nav
+  button's accessible name and the Analytics view's real `<h1>`, passes a
+  real `tsc --noEmit`) but have NOT run it end-to-end myself. Unlike the
+  Jest suite (see `components/__tests__/README.md`), actually running this
+  one for real would mean standing up a full real FastAPI backend *and* a
+  full real Next.js dev server together in a disposable sandbox -- a much
+  bigger lift than mirroring Jest's component-level renders, and out of
+  scope for this pass. Please run it the same way as the other two specs
+  and paste back what comes out.
 
 ## A real tradeoff worth knowing about, not hiding
 

@@ -4,6 +4,7 @@ import React from "react";
 import AdvancedAnalyticsDashboard from "../AdvancedAnalyticsDashboard";
 import VirtualCFOWidget from "../VirtualCFOWidget";
 import ForecastCard from "../ForecastCard";
+import ScenarioModelerCard from "../ScenarioModelerCard";
 import DataVisualizationWidget from "../DataVisualizationWidget";
 import TransactionScatterPanel from "../TransactionScatterPanel";
 import DataEngineerWidget from "../DataEngineerWidget";
@@ -21,6 +22,7 @@ export default function AnalyticsView({ refreshTrigger, onNavigateToLedger }: An
         <VirtualCFOWidget refreshTrigger={refreshTrigger} onNavigateToLedger={onNavigateToLedger} />
         <ForecastCard refreshTrigger={refreshTrigger} />
       </div>
+      <ScenarioModelerCard />
       <DataVisualizationWidget refreshTrigger={refreshTrigger} />
       <TransactionScatterPanel refreshTrigger={refreshTrigger} />
       <DataEngineerWidget refreshTrigger={refreshTrigger} />

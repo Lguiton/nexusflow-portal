@@ -7,6 +7,7 @@ import {
   Database,
   Waypoints,
   ShieldCheck,
+  Zap,
   Search,
   Bell,
   ArrowUpFromLine,
@@ -25,7 +26,7 @@ import type { HealthData } from "./SystemHealthStrip";
 // Every widget INSIDE each section below is unchanged, real, and
 // already wired to real backend data -- only the navigation chrome
 // around them is new.
-export type ViewId = "overview" | "analytics" | "ledger" | "swarm" | "trust";
+export type ViewId = "overview" | "analytics" | "ledger" | "swarm" | "trust" | "onetap";
 
 const VIEW_META: Record<ViewId, { label: string; title: string; subtitle: string; icon: React.ElementType }> = {
   overview: {
@@ -58,9 +59,15 @@ const VIEW_META: Record<ViewId, { label: string; title: string; subtitle: string
     subtitle: "What Eivanta knows for certain, and what it doesn't yet.",
     icon: ShieldCheck,
   },
+  onetap: {
+    label: "One-Tap Insights",
+    title: "One-Tap Insights",
+    subtitle: "Tap a question for an instant, real answer -- no dashboards to navigate.",
+    icon: Zap,
+  },
 };
 
-const VIEW_ORDER: ViewId[] = ["overview", "analytics", "ledger", "swarm", "trust"];
+const VIEW_ORDER: ViewId[] = ["overview", "analytics", "ledger", "swarm", "trust", "onetap"];
 
 interface AppShellProps {
   activeView: ViewId;

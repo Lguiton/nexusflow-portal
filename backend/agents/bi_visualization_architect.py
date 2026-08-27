@@ -6,14 +6,15 @@ import os
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-from openai import OpenAI
 
 try:
     from backend.db_manager import log_ai_usage_sync
     from backend.model_registry import get_model
+    from backend.byok import get_openai_client_for_tenant_sync
 except ImportError:
     from db_manager import log_ai_usage_sync
     from model_registry import get_model
+    from byok import get_openai_client_for_tenant_sync
 
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
@@ -25,8 +26,13 @@ logger = logging.getLogger("eivanta.bi_visualization_architect")
 AI_REQUEST_TIMEOUT_SECONDS = 30.0
 AI_MAX_RETRIES = 2
 
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key, timeout=AI_REQUEST_TIMEOUT_SECONDS, max_retries=AI_MAX_RETRIES) if api_key else None
+# BYOK-01: this used to be a single module-level client built once from the
+# platform's own OPENAI_API_KEY at import time -- fine when every tenant
+# shares the platform key, but incapable of ever routing to a tenant's own
+# key. platform_api_key is kept as the fallback; the actual client is now
+# built per-call in _summarize_with_llm() via get_openai_client_for_tenant_sync,
+# which uses the calling tenant's BYOK key when they've configured one.
+platform_api_key = os.getenv("OPENAI_API_KEY")
  
  
 def _summarize_with_llm(client_id: str, query: str, chart_type: str, recharts_config: dict, context: dict) -> List[str]:
@@ -36,6 +42,7 @@ def _summarize_with_llm(client_id: str, query: str, chart_type: str, recharts_co
     runs -- the model is asked to comment on why they fit, never to invent
     a different chart type or different columns.
     """
+    client = get_openai_client_for_tenant_sync(client_id, platform_api_key, AI_REQUEST_TIMEOUT_SECONDS, AI_MAX_RETRIES)
     if not client:
         return ["OpenAI client not configured -- no narrative commentary available; the chart recommendation above was derived directly from this tenant's real ledger data regardless."]
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
@@ -81,16 +88,21 @@ def _choose_chart(query: str, context: Dict[str, Any]) -> tuple:
     rationale_basis).
     """
     category_breakdown = context.get("category_breakdown", [])
-    monthly_totals = context.get("monthly_totals", [])
+    # Revenue-only monthly series -- see the matching fix note on
+    # generate_chart_suite's monthly_trend chart below for why this must be
+    # monthly_revenue_totals (amount > 0 only), not monthly_totals (which nets
+    # expenses in and would mislabel a net-position trend as a revenue trend
+    # whenever a "trend"/"growth"/"monthly" query triggers this branch).
+    monthly_totals = context.get("monthly_revenue_totals", [])
     q = query.lower()
- 
+
     wants_trend = any(kw in q for kw in ["trend", "over time", "monthly", "growth", "timeline", "history"])
- 
+
     if wants_trend and len(monthly_totals) >= 2:
         return (
             "line",
-            {"xAxis": "month", "dataKeys": ["total_amount"], "data_source": "monthly_totals"},
-            f"{len(monthly_totals)} real monthly totals from {context.get('date_min')} to {context.get('date_max')}",
+            {"xAxis": "month", "dataKeys": ["total_amount"], "data_source": "monthly_revenue_totals"},
+            f"{len(monthly_totals)} real monthly revenue totals from {context.get('date_min')} to {context.get('date_max')}",
         )
     if len(category_breakdown) > 8:
         return (
@@ -186,7 +198,16 @@ async def generate_chart_suite(client_id: str = "default_client") -> Dict[str, A
         }
 
     category_breakdown = context.get("category_breakdown", [])
-    monthly_totals = context.get("monthly_totals", [])
+    # BUG FIX (confirmed live 26 Aug 2026): this chart is titled "Monthly Revenue
+    # Trend" on the dashboard and this function's own docstring calls it "a real
+    # line chart of monthly revenue" -- but it was reading context["monthly_totals"],
+    # which nets revenue and expense together per month. On this tenant's real test
+    # ledger that plotted a downward-sloping line (net position getting more
+    # negative each month) labeled as revenue, while actual revenue only fell
+    # -32.9% month-over-month, not the steeper net decline shown. Fixed by reading
+    # monthly_revenue_totals (amount > 0 only), added to get_ledger_chart_context
+    # for this fix, so the chart plots what its own title and docstring claim.
+    monthly_totals = context.get("monthly_revenue_totals", [])
     charts: Dict[str, Any] = {}
 
     if category_breakdown:

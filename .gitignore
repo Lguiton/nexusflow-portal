@@ -1,8 +1,21 @@
 node_modules/
 .next/
 backend/venv/
+backend/.venv/
 __pycache__/
-.env
+*.pyc
 .env
 backend/.env
-backend/venv/
+frontend/.env.local
+
+# SEC-01 (27 Aug 2026): these are real, live application databases -- they
+# accumulate password hashes, refresh-token hashes, encrypted BYOK keys and
+# MFA secrets, and real tenant/ledger data as the app is used. None of that
+# belongs in version control at any point, hashed/encrypted or not. Added
+# here after finding backend/eivanta.duckdb and backend/eivanta_core.db
+# were BOTH already tracked (committed locally, never yet pushed to
+# origin) -- see the founder-facing note this session left about untracking
+# them and why the commit that added them still needs a deliberate,
+# explicit decision before this repo is ever pushed.
+*.duckdb
+backend/eivanta_core.db

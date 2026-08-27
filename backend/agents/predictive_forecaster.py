@@ -6,14 +6,17 @@ import numpy as np
 from scipy import stats
 from typing import Dict, Any, List, Tuple
 from dotenv import load_dotenv
-from openai import OpenAI
 
 try:
-    from backend.db_manager import DB_PATH, get_db_lock, log_ai_usage_sync, log_forecast_snapshot_sync
+    from backend import db_manager
+    from backend.db_manager import get_db_lock, log_ai_usage_sync, log_forecast_snapshot_sync
     from backend.model_registry import get_model
+    from backend.byok import get_openai_client_for_tenant_sync
 except ImportError:
-    from db_manager import DB_PATH, get_db_lock, log_ai_usage_sync, log_forecast_snapshot_sync
+    import db_manager
+    from db_manager import get_db_lock, log_ai_usage_sync, log_forecast_snapshot_sync
     from model_registry import get_model
+    from byok import get_openai_client_for_tenant_sync
 
 env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(env_path)
@@ -28,8 +31,13 @@ logger = logging.getLogger("eivanta.predictive_forecaster")
 AI_REQUEST_TIMEOUT_SECONDS = 30.0
 AI_MAX_RETRIES = 2
 
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key, timeout=AI_REQUEST_TIMEOUT_SECONDS, max_retries=AI_MAX_RETRIES) if api_key else None
+# BYOK-01: this used to be a single module-level client built once from the
+# platform's own OPENAI_API_KEY at import time -- fine when every tenant
+# shares the platform key, but incapable of ever routing to a tenant's own
+# key. platform_api_key is kept as the fallback; the actual client is now
+# built per-call in generate_forecast() via get_openai_client_for_tenant_sync,
+# which uses the calling tenant's BYOK key when they've configured one.
+platform_api_key = os.getenv("OPENAI_API_KEY")
 
 # FIN-04 decisions made explicit here rather than silently assumed --
 # revisit these deliberately, don't just accept them because they're in
@@ -83,14 +91,14 @@ def _load_monthly_revenue(safe_client_id: str) -> Tuple[List[str], List[float], 
     db_failed = False
     failure_reason = ""
 
-    if os.path.exists(DB_PATH):
+    if os.path.exists(db_manager.DB_PATH):
         lock = get_db_lock()
         with lock:
             conn = None
             try:
-                conn = duckdb.connect(DB_PATH, read_only=True)
+                conn = duckdb.connect(db_manager.DB_PATH, read_only=True)
             except Exception as e:
-                logger.error(f"Failed to open DuckDB at {DB_PATH}: {e}")
+                logger.error(f"Failed to open DuckDB at {db_manager.DB_PATH}: {e}")
                 db_failed = True
                 failure_reason = f"database connection failed: {e}"
 
@@ -351,6 +359,7 @@ def generate_forecast(client_id: str = "default_client") -> Dict[str, Any]:
 
     projections = None
     try:
+        client = get_openai_client_for_tenant_sync(client_id, platform_api_key, AI_REQUEST_TIMEOUT_SECONDS, AI_MAX_RETRIES)
         if not client:
             raise ValueError("OpenAI client not initialized.")
         model = get_model("predictive_forecaster")

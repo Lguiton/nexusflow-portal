@@ -11,6 +11,7 @@ import AnalyticsView from '../components/views/AnalyticsView';
 import LedgerView from '../components/views/LedgerView';
 import SwarmView from '../components/views/SwarmView';
 import TrustView from '../components/views/TrustView';
+import OneTapView from '../components/views/OneTapView';
 import type { HealthData } from '../components/SystemHealthStrip';
 
 // One-page Eivanta Console. Replaces the previous layout, which stacked
@@ -118,6 +119,9 @@ export default function CoreDashboard() {
           )}
           {activeView === 'trust' && (
             <TrustView refreshTrigger={dashboardRefreshTrigger} />
+          )}
+          {activeView === 'onetap' && (
+            <OneTapView onNavigateToView={(view) => setActiveView(view)} />
           )}
         </AppShell>
 

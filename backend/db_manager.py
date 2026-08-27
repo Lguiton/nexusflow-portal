@@ -4,6 +4,7 @@ import asyncio
 import threading
 import logging
 import hashlib
+import secrets
 from datetime import date, datetime
 from typing import Optional
 import duckdb
@@ -51,6 +52,48 @@ def get_db_lock() -> threading.Lock:
 # if a legitimate tenant ever needs headroom above these.
 MAX_INGEST_ROWS = 500_000
 MAX_INGEST_COLUMNS = 200
+
+# DATA-02: a formal alias-mapping table for common real-world header
+# variants of the canonical columns _read_csv_or_raise already recognizes
+# (amount/revenue/expense/cost/category/date/description) -- replacing the
+# previous ad-hoc behavior of only ever matching an EXACT (stripped,
+# lowercased) canonical name and rejecting anything else as "no recognized
+# amount column," even for an obviously-equivalent header like "amt" or
+# "txn_date". Deliberately conservative: every alias here is a real header
+# seen in common bank/accounting-export conventions (QuickBooks, Xero,
+# Wave, generic bank CSV exports), not a guess -- and deliberately leaves
+# out generic words like "type", "value", or "total" that are too likely
+# to mean something else in a given file, so this never silently
+# reinterprets an unrelated column as a financial one. Applied AFTER
+# strip+lower but BEFORE the duplicate-column check below, so a file that
+# has both an exact canonical header and an alias for the same concept
+# (e.g. both "amount" and "amt") is still caught there as a real,
+# actionable duplicate-column error, not silently resolved one way or the
+# other.
+HEADER_ALIAS_MAP = {
+    "amt": "amount",
+    "txn_amount": "amount",
+    "transaction_amount": "amount",
+    "net_amount": "amount",
+    "income": "revenue",
+    "sales": "revenue",
+    "expenses": "expense",
+    "spend": "expense",
+    "spending": "expense",
+    "costs": "cost",
+    "cat": "category",
+    "expense_category": "category",
+    "transaction_category": "category",
+    "txn_date": "date",
+    "transaction_date": "date",
+    "trans_date": "date",
+    "posted_date": "date",
+    "desc": "description",
+    "memo": "description",
+    "notes": "description",
+    "narrative": "description",
+    "details": "description",
+}
 
 async def init_db():
     lock = get_db_lock()
@@ -171,6 +214,34 @@ async def init_db():
                     except Exception as e:
                         if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
                             raise
+                # TEN-01/TEN-02: tenant lifecycle state -- deliberately its
+                # OWN column, separate from subscription_status above.
+                # subscription_status is reserved for real Stripe-driven
+                # state (still unwired -- see BILL-01's deferral); lifecycle
+                # is a manual owner action independent of billing, since no
+                # billing exists yet. Every existing and new tenant defaults
+                # to 'active' (today's only real behavior) -- never silently
+                # suspended by this migration. Same idempotent
+                # ALTER-TABLE-if-missing shape as byok_openai_key_encrypted
+                # and monthly_ai_budget_usd above.
+                if "lifecycle_status" not in tenant_cols:
+                    try:
+                        conn.execute("ALTER TABLE tenants ADD COLUMN lifecycle_status VARCHAR DEFAULT 'active'")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                if "suspended_at" not in tenant_cols:
+                    try:
+                        conn.execute("ALTER TABLE tenants ADD COLUMN suspended_at TIMESTAMP")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                if "suspended_by_user_id" not in tenant_cols:
+                    try:
+                        conn.execute("ALTER TABLE tenants ADD COLUMN suspended_by_user_id BIGINT")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
                 conn.execute("CREATE SEQUENCE IF NOT EXISTS user_id_seq")
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS users (
@@ -183,6 +254,95 @@ async def init_db():
                         last_login_at TIMESTAMP
                     )
                 """)
+                # AUTH-05: login throttling / brute-force protection. Same
+                # idempotent ALTER-TABLE-if-missing shape as byok_openai_key_encrypted
+                # and monthly_ai_budget_usd above -- safe to run against a
+                # users table that already has real rows. failed_login_attempts
+                # defaults to 0 (every existing row behaves exactly as before:
+                # unlocked) and locked_until defaults to NULL (never locked)
+                # until backend/accounts.py's login() actually records a
+                # failure -- see record_failed_login below.
+                # BUGFIX (found while building AUTH-04): this was `r[0]` (the
+                # column's cid, an int) instead of `r[1]` (its name) -- so
+                # "failed_login_attempts" was never actually IN this list no
+                # matter what, and every one of these six guards silently
+                # re-ran its ALTER on every single init_db() call (which
+                # happens dozens of times per request across this file, not
+                # just once at startup). On a BRAND NEW users table that's
+                # harmless -- the ALTER just re-adds a column that isn't
+                # there yet -- so it never surfaced against a fresh db. But
+                # against a users table that already has these columns (i.e.
+                # after the very first call), each guard's ALTER now hits a
+                # real "column already exists" CatalogException every time;
+                # those get caught by the try/except below, but DuckDB (unlike
+                # SQLite) marks the whole connection's transaction aborted
+                # once enough statements in it have errored, so a later
+                # statement on that same connection can fail with
+                # "TransactionException: Current transaction is aborted" even
+                # though IT would have succeeded on its own. Adding the four
+                # AUTH-04 MFA columns below pushed the error count in this
+                # block over that threshold and turned a previously-silent
+                # bug into 72 real failing tests -- caught here in this
+                # session's own verification pass before delivery, not by the
+                # founder in production. Fixed by reading the column NAME
+                # (r[1]) instead of its cid (r[0]), matching how tenant_cols
+                # above already (correctly) does this a few lines up.
+                user_cols = [r[1] for r in conn.execute("PRAGMA table_info('users')").fetchall()]
+                if "failed_login_attempts" not in user_cols:
+                    try:
+                        conn.execute("ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER DEFAULT 0")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                if "locked_until" not in user_cols:
+                    try:
+                        conn.execute("ALTER TABLE users ADD COLUMN locked_until TIMESTAMP")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                # AUTH-04: TOTP-based MFA, per-user (not per-tenant -- each
+                # person on a team enables/disables their own second
+                # factor independently). Same idempotent ALTER-TABLE-if-
+                # missing shape as failed_login_attempts/locked_until
+                # above. mfa_secret_encrypted holds the CONFIRMED, active
+                # secret (Fernet-encrypted via backend/byok.py's
+                # encrypt_secret -- reusing that module's existing
+                # encryption-at-rest helper rather than a second one);
+                # mfa_pending_secret_encrypted holds a NOT-yet-confirmed
+                # secret from /mfa/setup, kept separate so a half-finished
+                # re-enrollment can never silently clobber a working
+                # enabled secret before a real code confirms it (see
+                # confirm_mfa_enrollment below, which is the only thing
+                # that moves pending -> active). mfa_backup_codes_json is
+                # a JSON array of SHA-256 hex digests (not bcrypt -- these
+                # are high-entropy random codes, not human-chosen
+                # passwords, same reasoning api_keys.py's key_hash already
+                # documents), each consumed (removed) on first successful
+                # use.
+                if "mfa_enabled" not in user_cols:
+                    try:
+                        conn.execute("ALTER TABLE users ADD COLUMN mfa_enabled BOOLEAN DEFAULT FALSE")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                if "mfa_secret_encrypted" not in user_cols:
+                    try:
+                        conn.execute("ALTER TABLE users ADD COLUMN mfa_secret_encrypted VARCHAR")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                if "mfa_pending_secret_encrypted" not in user_cols:
+                    try:
+                        conn.execute("ALTER TABLE users ADD COLUMN mfa_pending_secret_encrypted VARCHAR")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                if "mfa_backup_codes_json" not in user_cols:
+                    try:
+                        conn.execute("ALTER TABLE users ADD COLUMN mfa_backup_codes_json VARCHAR")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
                 # Case-insensitive uniqueness is enforced in Python (every
                 # write/lookup lower()s the email first -- see
                 # get_user_by_email/create_tenant_and_owner/
@@ -197,6 +357,103 @@ async def init_db():
                 except Exception as e:
                     if "already exists" not in str(e).lower():
                         raise
+
+                # INT-01: scoped API keys for the MCP read-only tool server
+                # (backend/mcp_server.py). Deliberately a SEPARATE credential
+                # from a user's JWT -- an MCP client (Claude Desktop, another
+                # workflow tool) is not a logged-in browser session, and a
+                # long-lived JWT would be the wrong shape for that (no
+                # expiry tied to a login, no per-key revocation). Same
+                # idempotent CREATE-IF-NOT-EXISTS shape as every other
+                # migration in this function. Only the SHA-256 hash of the
+                # raw key is ever stored -- see generate_api_key below for
+                # why bcrypt (meant for low-entropy human passwords) is the
+                # wrong tool for a high-entropy random token.
+                conn.execute("CREATE SEQUENCE IF NOT EXISTS api_key_id_seq")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS api_keys (
+                        key_id BIGINT DEFAULT nextval('api_key_id_seq'),
+                        client_id VARCHAR NOT NULL,
+                        label VARCHAR,
+                        key_prefix VARCHAR NOT NULL,
+                        key_hash VARCHAR NOT NULL,
+                        created_by_user_id BIGINT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_used_at TIMESTAMP,
+                        revoked_at TIMESTAMP
+                    )
+                """)
+                try:
+                    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS api_keys_hash_unique ON api_keys(key_hash)")
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        raise
+
+                # AUTH-02: real refresh-token rotation. Access tokens (the
+                # JWTs minted by accounts.py's _mint_token) are now SHORT-
+                # lived -- there's no way to revoke a stateless JWT early,
+                # so the fix is to make one useless quickly rather than try
+                # to blocklist it. A refresh token is the long-lived
+                # credential instead: opaque (not a JWT -- nothing to
+                # decode, so nothing to forge), and only its SHA-256 hash
+                # is ever stored here, same reasoning as api_keys.key_hash
+                # above (a high-entropy random token, not a human password,
+                # so a fast hash is the right tool). replaced_by_hash links
+                # a rotated-away token forward to the one that replaced it
+                # -- accounts.py's refresh() uses that link purely for
+                # audit/debugging; the actual reuse-detection check is just
+                # "is revoked_at already set."
+                conn.execute("CREATE SEQUENCE IF NOT EXISTS refresh_token_id_seq")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS refresh_tokens (
+                        refresh_token_id BIGINT DEFAULT nextval('refresh_token_id_seq'),
+                        user_id BIGINT NOT NULL,
+                        client_id VARCHAR NOT NULL,
+                        token_hash VARCHAR NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        expires_at TIMESTAMP NOT NULL,
+                        revoked_at TIMESTAMP,
+                        replaced_by_hash VARCHAR
+                    )
+                """)
+                try:
+                    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS refresh_tokens_hash_unique ON refresh_tokens(token_hash)")
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        raise
+
+                # AUTH-06: session/device management. device_label and
+                # session_started_at ride along on the SAME refresh_tokens
+                # row created by AUTH-02, rather than a separate table,
+                # because a "session" here just IS a refresh-token rotation
+                # chain -- listing sessions is listing the chain's current
+                # (non-revoked, non-expired) row. Existence-checked via
+                # r[1] (column name), matching the r[1]-not-r[0] lesson
+                # documented above for user_cols -- r[0] is PRAGMA
+                # table_info's cid (an int), which would make this check
+                # permanently a no-op and re-run the ALTER on every
+                # init_db() call, exactly the bug that broke MFA's rollout.
+                # Both columns are set ONLY at a fresh mint (login/signup/
+                # mfa_verify, via accounts.py's _mint_refresh_token) and
+                # carried forward unchanged by create_refresh_token during
+                # a rotation, so a session's device label and "signed in
+                # since" time stay stable across its whole rotation chain
+                # -- created_at (already on this table) continues to
+                # reflect each individual row's own mint/rotation time,
+                # acting as a "last active" proxy for that same session.
+                refresh_token_cols = [r[1] for r in conn.execute("PRAGMA table_info('refresh_tokens')").fetchall()]
+                if "device_label" not in refresh_token_cols:
+                    try:
+                        conn.execute("ALTER TABLE refresh_tokens ADD COLUMN device_label VARCHAR")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
+                if "session_started_at" not in refresh_token_cols:
+                    try:
+                        conn.execute("ALTER TABLE refresh_tokens ADD COLUMN session_started_at TIMESTAMP")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
             finally:
                 conn.close()
     await asyncio.to_thread(_init)
@@ -326,7 +583,14 @@ async def create_invited_user(client_id: str, email: str, password_hash: str, ro
 
 
 async def get_user_by_email(email: str) -> Optional[dict]:
-    """Real lookup for login -- returns the password_hash too (caller verifies it), or None."""
+    """
+    Real lookup for login -- returns the password_hash too (caller
+    verifies it), or None. Also returns failed_login_attempts and
+    locked_until (AUTH-05) so the login endpoint can check lockout status
+    BEFORE ever calling verify_password -- a locked account should never
+    burn a real bcrypt verify (or leak timing) on a request it's going to
+    reject regardless of the password's correctness.
+    """
     await init_db()
     lock = get_db_lock()
     email_norm = email.strip().lower()
@@ -336,7 +600,8 @@ async def get_user_by_email(email: str) -> Optional[dict]:
             conn = duckdb.connect(DB_PATH)
             try:
                 row = conn.execute(
-                    "SELECT user_id, client_id, email, password_hash, role FROM users WHERE email = ?",
+                    "SELECT user_id, client_id, email, password_hash, role, "
+                    "failed_login_attempts, locked_until, mfa_enabled FROM users WHERE email = ?",
                     [email_norm],
                 ).fetchone()
                 if not row:
@@ -344,6 +609,46 @@ async def get_user_by_email(email: str) -> Optional[dict]:
                 return {
                     "user_id": row[0], "client_id": row[1], "email": row[2],
                     "password_hash": row[3], "role": row[4],
+                    "failed_login_attempts": row[5] or 0, "locked_until": row[6],
+                    "mfa_enabled": bool(row[7]),
+                }
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def get_user_by_id(user_id: int, client_id: Optional[str] = None) -> Optional[dict]:
+    """
+    AUTH-04: counterpart to get_user_by_email, keyed by user_id -- needed
+    by the MFA endpoints, which only ever have an AuthenticatedUser (from
+    a verified JWT) in hand, not an email. client_id is optional but
+    should always be passed when the caller already has a verified one
+    (every real caller does) -- an extra defense-in-depth scoping check
+    on top of user_id already being a real primary key, at zero cost.
+    """
+    await init_db()
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                query = (
+                    "SELECT user_id, client_id, email, password_hash, role, "
+                    "failed_login_attempts, locked_until, mfa_enabled FROM users WHERE user_id = ?"
+                )
+                params = [user_id]
+                if client_id:
+                    query += " AND client_id = ?"
+                    params.append(client_id)
+                row = conn.execute(query, params).fetchone()
+                if not row:
+                    return None
+                return {
+                    "user_id": row[0], "client_id": row[1], "email": row[2],
+                    "password_hash": row[3], "role": row[4],
+                    "failed_login_attempts": row[5] or 0, "locked_until": row[6],
+                    "mfa_enabled": bool(row[7]),
                 }
             finally:
                 conn.close()
@@ -351,6 +656,13 @@ async def get_user_by_email(email: str) -> Optional[dict]:
 
 
 async def update_last_login(user_id: int) -> None:
+    """
+    Called on every SUCCESSFUL login. AUTH-05: also clears any brute-force
+    lockout state -- a real successful login is proof the right person is
+    back in control of the account, so there's no reason to keep counting
+    against a prior failed-attempt streak, or to leave a (by now
+    presumably expired anyway) locked_until sitting on the row.
+    """
     lock = get_db_lock()
 
     def _update():
@@ -358,11 +670,479 @@ async def update_last_login(user_id: int) -> None:
             conn = duckdb.connect(DB_PATH)
             try:
                 conn.execute(
-                    "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE user_id = ?", [user_id]
+                    "UPDATE users SET last_login_at = CURRENT_TIMESTAMP, "
+                    "failed_login_attempts = 0, locked_until = NULL WHERE user_id = ?",
+                    [user_id],
                 )
             finally:
                 conn.close()
     await asyncio.to_thread(_update)
+
+
+async def record_failed_login(user_id: int, max_attempts: int, lockout_minutes: int) -> dict:
+    """
+    AUTH-05: real brute-force throttling. Called once per wrong-password
+    attempt against a REAL, already-found user row (accounts.login()
+    never calls this for a nonexistent email -- see that function's own
+    comment on why: a nonexistent email must stay indistinguishable from
+    a wrong password, and an email with no user row has nowhere to store
+    an attempt count anyway).
+
+    Increments failed_login_attempts. Once it reaches max_attempts, sets
+    locked_until = now + lockout_minutes and resets the counter to 0, so
+    the account gets a fresh full window of attempts once the lockout
+    expires rather than immediately re-locking on the next single
+    failure. locked_until is computed in Python (datetime.now() + a
+    timedelta) rather than a SQL INTERVAL expression -- simpler to reason
+    about and test than building interval syntax from an f-string, and
+    consistent with how every other time-based value in this file is
+    computed.
+
+    Returns {"locked": bool, "locked_until": Optional[datetime],
+    "attempts": int} so the caller can decide what to tell the real
+    person on the other end of this request.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    lock = get_db_lock()
+
+    def _record():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT failed_login_attempts FROM users WHERE user_id = ?", [user_id]
+                ).fetchone()
+                current = (row[0] or 0) if row else 0
+                new_count = current + 1
+                if new_count >= max_attempts:
+                    locked_until = datetime.now(timezone.utc) + timedelta(minutes=lockout_minutes)
+                    conn.execute(
+                        "UPDATE users SET failed_login_attempts = 0, locked_until = ? WHERE user_id = ?",
+                        [locked_until, user_id],
+                    )
+                    return {"locked": True, "locked_until": locked_until, "attempts": new_count}
+                conn.execute(
+                    "UPDATE users SET failed_login_attempts = ? WHERE user_id = ?",
+                    [new_count, user_id],
+                )
+                return {"locked": False, "locked_until": None, "attempts": new_count}
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_record)
+
+
+# ---------------------------------------------------------------------------
+# AUTH-04: TOTP-based MFA storage. All secret/backup-code VERIFICATION
+# (pyotp.TOTP(...).verify, hashing a submitted backup code and comparing)
+# lives in backend/accounts.py, not here -- this module stays the same
+# "storage + tenant/user scoping only" layer every other feature in this
+# file already is, per this file's own module-level convention. The one
+# exception is that this module DOES call backend/byok.py's decrypt_secret
+# nowhere -- callers decrypt after reading, so a Fernet-key rotation only
+# ever needs backend/byok.py touched, never this file.
+# ---------------------------------------------------------------------------
+
+async def get_mfa_status(user_id: int) -> dict:
+    """Real enabled/disabled state plus how many single-use backup codes are left."""
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT mfa_enabled, mfa_backup_codes_json FROM users WHERE user_id = ?",
+                    [user_id],
+                ).fetchone()
+                if not row:
+                    return {"enabled": False, "backup_codes_remaining": 0}
+                codes = json.loads(row[1]) if row[1] else []
+                return {"enabled": bool(row[0]), "backup_codes_remaining": len(codes)}
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def set_pending_mfa_secret(user_id: int, encrypted_secret: str) -> None:
+    """
+    AUTH-04 step 1 (/mfa/setup): stores a NOT-yet-confirmed secret.
+    Deliberately does not touch mfa_enabled or the active
+    mfa_secret_encrypted -- an already-enabled account calling /mfa/setup
+    again (to re-enroll a new device) must keep working with its OLD
+    secret until the NEW one is actually confirmed via a real code (see
+    confirm_mfa_enrollment), never silently locked out mid-re-enrollment.
+    """
+    lock = get_db_lock()
+
+    def _set():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "UPDATE users SET mfa_pending_secret_encrypted = ? WHERE user_id = ?",
+                    [encrypted_secret, user_id],
+                )
+            finally:
+                conn.close()
+    await asyncio.to_thread(_set)
+
+
+async def get_pending_mfa_secret(user_id: int) -> Optional[str]:
+    """The still-Fernet-encrypted pending secret from /mfa/setup, or None if none is pending."""
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT mfa_pending_secret_encrypted FROM users WHERE user_id = ?", [user_id]
+                ).fetchone()
+                return row[0] if row else None
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def get_mfa_secret_encrypted(user_id: int) -> Optional[str]:
+    """The ACTIVE, confirmed, still-Fernet-encrypted secret -- None if MFA isn't enabled."""
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT mfa_secret_encrypted FROM users WHERE user_id = ? AND mfa_enabled = TRUE",
+                    [user_id],
+                ).fetchone()
+                return row[0] if row else None
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def confirm_mfa_enrollment(user_id: int, backup_code_hashes: list) -> bool:
+    """
+    AUTH-04 step 2 (/mfa/enable): the ONLY function that moves a pending
+    secret to active. Returns False (no-op) if there's no pending secret
+    to confirm -- the caller (accounts.py) is expected to have already
+    verified a real TOTP code against that pending secret before calling
+    this; this function itself trusts that verification happened and just
+    performs the atomic column move plus backup-code write.
+    """
+    lock = get_db_lock()
+
+    def _confirm():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT mfa_pending_secret_encrypted FROM users WHERE user_id = ?", [user_id]
+                ).fetchone()
+                if not row or not row[0]:
+                    return False
+                conn.execute(
+                    "UPDATE users SET mfa_enabled = TRUE, mfa_secret_encrypted = ?, "
+                    "mfa_pending_secret_encrypted = NULL, mfa_backup_codes_json = ? WHERE user_id = ?",
+                    [row[0], json.dumps(backup_code_hashes), user_id],
+                )
+                return True
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_confirm)
+
+
+async def consume_backup_code_if_valid(user_id: int, code_hash: str) -> bool:
+    """
+    Checks a SHA-256 hash (computed by the caller from the raw code the
+    person typed in) against this user's remaining backup codes; removes
+    it (single-use) and returns True on a match, returns False (no state
+    change) otherwise. Read-modify-write under the same global db_lock
+    every other write in this file already serializes through, so two
+    concurrent attempts against the same code can't both "succeed."
+    """
+    lock = get_db_lock()
+
+    def _consume():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT mfa_backup_codes_json FROM users WHERE user_id = ?", [user_id]
+                ).fetchone()
+                if not row or not row[0]:
+                    return False
+                codes = json.loads(row[0])
+                if code_hash not in codes:
+                    return False
+                codes.remove(code_hash)
+                conn.execute(
+                    "UPDATE users SET mfa_backup_codes_json = ? WHERE user_id = ?",
+                    [json.dumps(codes), user_id],
+                )
+                return True
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_consume)
+
+
+async def disable_mfa(user_id: int) -> None:
+    """AUTH-04: full teardown -- clears the active secret, any dangling pending secret, and all backup codes."""
+    lock = get_db_lock()
+
+    def _disable():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "UPDATE users SET mfa_enabled = FALSE, mfa_secret_encrypted = NULL, "
+                    "mfa_pending_secret_encrypted = NULL, mfa_backup_codes_json = NULL WHERE user_id = ?",
+                    [user_id],
+                )
+            finally:
+                conn.close()
+    await asyncio.to_thread(_disable)
+
+
+async def create_refresh_token(
+    user_id: int,
+    client_id: str,
+    token_hash: str,
+    expires_at: datetime,
+    replaces_hash: Optional[str] = None,
+    device_label: Optional[str] = None,
+) -> None:
+    """
+    AUTH-02: stores a new refresh token's hash -- the raw value never
+    reaches this file (backend/accounts.py's _mint_refresh_token generates
+    it and hashes it before ever calling this). When replaces_hash is set
+    (a rotation, not a fresh login), the OLD row is linked forward to this
+    new one purely for audit trail -- the actual "was this already used"
+    check in refresh() only looks at revoked_at, not this link.
+
+    AUTH-06: device_label and the session's start time are meant to stay
+    STABLE across an entire rotation chain -- a "session" a user recognizes
+    in a device list is the chain, not any one row in it. So:
+      - Fresh mint (replaces_hash is None): device_label is whatever the
+        caller passed in (accounts.py derives it from the request's
+        User-Agent at login/signup/mfa_verify time), and session_started_at
+        is set to now.
+      - Rotation (replaces_hash is set): device_label/session_started_at
+        are copied FORWARD from the row being replaced, ignoring whatever
+        device_label the caller passed (refresh() never derives a fresh
+        one -- see accounts.py's refresh()), so the same browser session
+        keeps showing the same device label and "signed in since" time no
+        matter how many times its access token has been silently refreshed.
+        If the old row is somehow already gone, this degrades to a fresh
+        mint rather than raising, since a session list slot with a null
+        label/timestamp is a cosmetic issue, not a security one.
+
+    Explicitly calls init_db() first -- unlike most callers here, refresh()
+    and logout() in backend/accounts.py deliberately need NO prior
+    authenticated call (no Authorization header at all), so one of these
+    functions can genuinely be the very first database touch of a request
+    against a brand-new DB file. Every other write path in this module
+    reaches that lazily via signup/login having already run first; these
+    can't assume that.
+    """
+    await init_db()
+    lock = get_db_lock()
+
+    def _create():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                final_label = device_label
+                started_at = None
+                if replaces_hash:
+                    old_row = conn.execute(
+                        "SELECT device_label, session_started_at FROM refresh_tokens WHERE token_hash = ?",
+                        [replaces_hash],
+                    ).fetchone()
+                    if old_row:
+                        final_label, started_at = old_row[0], old_row[1]
+                if started_at is None:
+                    started_at = datetime.utcnow()
+                conn.execute(
+                    "INSERT INTO refresh_tokens "
+                    "(user_id, client_id, token_hash, expires_at, device_label, session_started_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [user_id, client_id, token_hash, expires_at, final_label, started_at],
+                )
+                if replaces_hash:
+                    conn.execute(
+                        "UPDATE refresh_tokens SET replaced_by_hash = ? WHERE token_hash = ?",
+                        [token_hash, replaces_hash],
+                    )
+            finally:
+                conn.close()
+    await asyncio.to_thread(_create)
+
+
+async def get_refresh_token(token_hash: str) -> Optional[dict]:
+    """
+    AUTH-02: real lookup for POST /api/v1/auth/refresh. Returns None for an
+    unknown hash -- a real row that's revoked or expired IS returned, so
+    the caller can distinguish those cases (see accounts.py's refresh(),
+    which reacts differently to each). Calls init_db() first -- see
+    create_refresh_token's docstring for why this one function can't
+    assume it already ran.
+
+    AUTH-06: also returns replaced_by_hash now, NOT for its original
+    audit-trail purpose but because refresh() needs it to tell apart two
+    very different reasons a row can be revoked_at-not-null: rotated away
+    as part of a normal refresh (replaced_by_hash gets set, by
+    create_refresh_token, in that same call) vs. revoked for any other
+    reason -- logout(), a session-management DELETE, or a revoke-all
+    (none of which ever set replaced_by_hash). Only the former is a real
+    "this exact token was replayed after being retired" signal; the
+    latter just means "this session was intentionally ended elsewhere,"
+    which must NOT be treated as reuse (see refresh()'s own docstring for
+    why conflating the two used to nuke an unrelated device's session the
+    next time it happened to background-refresh).
+    """
+    await init_db()
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT user_id, client_id, expires_at, revoked_at, replaced_by_hash "
+                    "FROM refresh_tokens WHERE token_hash = ?",
+                    [token_hash],
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "user_id": row[0],
+                    "client_id": row[1],
+                    "expires_at": row[2],
+                    "revoked_at": row[3],
+                    "replaced_by_hash": row[4],
+                }
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def list_active_sessions_for_user(user_id: int) -> list:
+    """
+    AUTH-06: GET /api/v1/auth/sessions' real data source. A "session" is
+    one non-revoked, non-expired refresh_tokens row -- token_hash itself is
+    deliberately never selected here (nothing that identifies the raw
+    credential should leave this function), only the display-safe fields a
+    user needs to recognize and manage their own signed-in devices.
+    Ordered newest-first by session_started_at so the device the user is
+    looking at right now tends to surface near the top.
+    """
+    await init_db()
+    lock = get_db_lock()
+
+    def _list():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                rows = conn.execute(
+                    "SELECT refresh_token_id, device_label, session_started_at, created_at, expires_at "
+                    "FROM refresh_tokens "
+                    "WHERE user_id = ? AND revoked_at IS NULL AND expires_at > CURRENT_TIMESTAMP "
+                    "ORDER BY session_started_at DESC NULLS LAST, refresh_token_id DESC",
+                    [user_id],
+                ).fetchall()
+                return [
+                    {
+                        "session_id": r[0],
+                        "device_label": r[1],
+                        "session_started_at": r[2],
+                        "last_active_at": r[3],
+                        "expires_at": r[4],
+                    }
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_list)
+
+
+async def revoke_session_for_user(user_id: int, session_id: int) -> bool:
+    """
+    AUTH-06: DELETE /api/v1/auth/sessions/{session_id}. Scoped strictly to
+    the CALLING user's own rows via the "AND user_id = ?" clause -- this is
+    the only thing standing between "sign out one of my own devices" and
+    "sign out any user's session by guessing an id", so it is not
+    optional. Returns True if a row was actually revoked (so the endpoint
+    can 404 on anything else: someone else's session, an already-revoked
+    one, or a made-up id -- all indistinguishable to the caller, which is
+    the point).
+    """
+    await init_db()
+    lock = get_db_lock()
+
+    def _revoke():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                # Checked BEFORE the UPDATE (not after) so the return value
+                # means "this call is the one that revoked it" rather than
+                # "it's revoked now" -- the latter would also be true for
+                # an already-revoked row and make the endpoint 404 on a
+                # session the caller just successfully signed out a moment
+                # ago, which is confusing behavior for a retry/double-click.
+                existing = conn.execute(
+                    "SELECT revoked_at FROM refresh_tokens WHERE refresh_token_id = ? AND user_id = ?",
+                    [session_id, user_id],
+                ).fetchone()
+                if existing is None or existing[0] is not None:
+                    return False
+                conn.execute(
+                    "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP "
+                    "WHERE refresh_token_id = ? AND user_id = ? AND revoked_at IS NULL",
+                    [session_id, user_id],
+                )
+                return True
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_revoke)
+
+
+async def revoke_refresh_token(token_hash: str) -> None:
+    """AUTH-02: marks one refresh token revoked (e.g. on logout). Idempotent -- revoking an already-revoked or nonexistent hash is a silent no-op, never an error. Calls init_db() first -- see create_refresh_token's docstring for why this one function can't assume it already ran."""
+    await init_db()
+    lock = get_db_lock()
+
+    def _revoke():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ? AND revoked_at IS NULL",
+                    [token_hash],
+                )
+            finally:
+                conn.close()
+    await asyncio.to_thread(_revoke)
+
+
+async def revoke_all_refresh_tokens_for_user(user_id: int) -> None:
+    """AUTH-02's reuse-detection response (a stolen-and-replayed refresh token kills every session on the account), and the storage foundation AUTH-06's forced-logout-everywhere will call directly. Calls init_db() first -- see create_refresh_token's docstring for why this one function can't assume it already ran."""
+    await init_db()
+    lock = get_db_lock()
+
+    def _revoke_all():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
+                    [user_id],
+                )
+            finally:
+                conn.close()
+    await asyncio.to_thread(_revoke_all)
 
 
 async def list_users_for_tenant(client_id: str) -> list[dict]:
@@ -510,6 +1290,291 @@ async def update_tenant_billing(
             finally:
                 conn.close()
     return await asyncio.to_thread(_update)
+
+
+# TEN-01/TEN-02/TEN-03: tenant lifecycle -- suspend/reactivate (manual,
+# owner-triggered; NOT subscription-driven, since no billing exists yet --
+# see the doc's own note that TEN-02's "subscription-driven access
+# control" half stays open), full data export, and permanent deletion.
+# Enforcement (who's allowed to call these, and the suspension GATE that
+# blocks every OTHER endpoint for a suspended tenant) lives in
+# backend/auth.py, same separation as every other RBAC-01 function above --
+# this module only stores and retrieves.
+
+# Every table below that carries a client_id column is considered "tenant
+# data" for export/delete purposes. task_telemetry is deliberately EXCLUDED
+# -- it has no client_id column at all; it's platform-wide agent telemetry
+# (including seeded bootstrap rows, see is_seed_data), never one tenant's
+# data. Keeping this list in one place means export and delete can never
+# silently drift apart (a table added to one but not the other).
+_TENANT_SCOPED_TABLES = (
+    "ledgers", "users", "api_keys", "ai_lineage_log", "query_audit",
+    "ingestion_history", "conversation_turns", "ai_usage", "forecast_snapshots",
+)
+
+
+async def get_tenant_lifecycle_status(client_id: str) -> Optional[str]:
+    """
+    Lightweight, single-column lookup -- called on EVERY authenticated
+    request via backend/auth.py's verify_jwt_and_get_user, so this stays as
+    cheap as a real lookup can be rather than reusing the heavier
+    get_tenant() (which selects billing columns this call never needs).
+    Returns None if the tenant row itself doesn't exist (should not happen
+    for a real, already-issued JWT -- every user's client_id is created
+    together with its tenant row in create_tenant_and_owner -- but the
+    caller treats None as "can't confirm suspended" rather than raising,
+    so a data anomaly here fails open on lifecycle state, not closed on
+    all authentication -- see auth.py's own comment on that trade-off).
+    """
+    await init_db()
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT lifecycle_status FROM tenants WHERE client_id = ?", [client_id]
+                ).fetchone()
+                return row[0] if row else None
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def get_tenant_lifecycle_detail(client_id: str) -> Optional[dict]:
+    """
+    Fuller lifecycle detail for GET /api/v1/tenant/status and the
+    suspend/reactivate responses -- includes WHO suspended it and WHEN,
+    resolved to a real email (not just a bare user_id) so the UI can show
+    something a human can actually read. Returns None if the tenant row
+    doesn't exist.
+    """
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT t.client_id, t.company_name, t.lifecycle_status, t.suspended_at, "
+                    "t.suspended_by_user_id, u.email "
+                    "FROM tenants t LEFT JOIN users u ON u.user_id = t.suspended_by_user_id "
+                    "WHERE t.client_id = ?",
+                    [client_id],
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "client_id": row[0],
+                    "company_name": row[1],
+                    "lifecycle_status": row[2] or "active",
+                    "suspended_at": str(row[3]) if row[3] is not None else None,
+                    "suspended_by_user_id": row[4],
+                    "suspended_by_email": row[5],
+                }
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def suspend_tenant(client_id: str, suspended_by_user_id: int) -> Optional[dict]:
+    """
+    Idempotent: suspending an already-suspended tenant just refreshes
+    suspended_at/suspended_by_user_id to this call's actor rather than
+    erroring -- there's no meaningful "already suspended" failure mode
+    here, only "who most recently suspended it." Returns None if the
+    tenant doesn't exist (caller's client_id came from a verified JWT, so
+    this should not happen in practice; guarded anyway).
+    """
+    lock = get_db_lock()
+
+    def _suspend():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                exists = conn.execute("SELECT 1 FROM tenants WHERE client_id = ?", [client_id]).fetchone()
+                if not exists:
+                    return None
+                conn.execute(
+                    "UPDATE tenants SET lifecycle_status = 'suspended', "
+                    "suspended_at = CURRENT_TIMESTAMP, suspended_by_user_id = ? WHERE client_id = ?",
+                    [suspended_by_user_id, client_id],
+                )
+                return True
+            finally:
+                conn.close()
+    result = await asyncio.to_thread(_suspend)
+    if result is None:
+        return None
+    return await get_tenant_lifecycle_detail(client_id)
+
+
+async def reactivate_tenant(client_id: str) -> Optional[dict]:
+    """Clears suspension state back to 'active'. Idempotent on an already-active tenant."""
+    lock = get_db_lock()
+
+    def _reactivate():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                exists = conn.execute("SELECT 1 FROM tenants WHERE client_id = ?", [client_id]).fetchone()
+                if not exists:
+                    return None
+                conn.execute(
+                    "UPDATE tenants SET lifecycle_status = 'active', "
+                    "suspended_at = NULL, suspended_by_user_id = NULL WHERE client_id = ?",
+                    [client_id],
+                )
+                return True
+            finally:
+                conn.close()
+    result = await asyncio.to_thread(_reactivate)
+    if result is None:
+        return None
+    return await get_tenant_lifecycle_detail(client_id)
+
+
+def _existing_tables(conn) -> set:
+    """
+    Several of _TENANT_SCOPED_TABLES are NOT created by init_db()'s
+    up-front migration block above -- ai_lineage_log, query_audit,
+    ingestion_history, conversation_turns, ai_usage, and forecast_snapshots
+    are each created lazily, inside the feature that first writes to them
+    (a fresh tenant that's never triggered an AI query, an NL-to-SQL
+    request, an ingest, a chat turn, a billed AI call, or a forecast run
+    simply has no such table in the database yet). export_tenant_data and
+    delete_tenant_permanently both need this: querying a table that
+    doesn't exist raises a real DuckDB CatalogException, which is not an
+    error condition here -- it just means zero rows for this tenant in
+    that particular feature area, exactly as if the table existed and was
+    empty.
+    """
+    return {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+
+
+def _rows_to_dicts(conn, table: str, client_id: str, exclude_cols: tuple = (), existing: set = None) -> list[dict]:
+    """
+    Shared helper for export_tenant_data below: introspects a table's real
+    columns (PRAGMA table_info), excludes any secret column by name (never
+    by assuming a fixed column order), and returns every client_id-scoped
+    row as a list of plain dicts. Datetime/date values are stringified so
+    the result is directly JSON-serializable without a custom encoder.
+    Returns [] without querying at all if the table doesn't exist yet for
+    this database (see _existing_tables above) -- never a fabricated
+    error, and never a table this tenant genuinely has no rows in.
+    """
+    if existing is not None and table not in existing:
+        return []
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info('{table}')").fetchall() if r[1] not in exclude_cols]
+    if not cols:
+        return []
+    col_list = ", ".join(cols)
+    rows = conn.execute(f"SELECT {col_list} FROM {table} WHERE client_id = ?", [client_id]).fetchall()
+    out = []
+    for row in rows:
+        d = {}
+        for col, val in zip(cols, row):
+            d[col] = str(val) if hasattr(val, "isoformat") else val
+        out.append(d)
+    return out
+
+
+async def export_tenant_data(client_id: str) -> Optional[dict]:
+    """
+    TEN-03: full, real data-portability export -- every row this tenant's
+    users/agents have ever generated, across every client_id-scoped table
+    (see _TENANT_SCOPED_TABLES above), as one JSON-serializable dict.
+    Secret columns are excluded by name, never returned even encrypted:
+    users.password_hash and api_keys.key_hash/key_prefix (key_prefix alone
+    is low-sensitivity but not this tenant's DATA -- it's a credential
+    artifact; excluded for the same reason password_hash is). Returns None
+    if the tenant doesn't exist.
+    """
+    lock = get_db_lock()
+
+    def _export():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                tenant_row = conn.execute(
+                    "SELECT client_id, company_name, subscription_status, lifecycle_status, created_at "
+                    "FROM tenants WHERE client_id = ?",
+                    [client_id],
+                ).fetchone()
+                if not tenant_row:
+                    return None
+                result = {
+                    "tenant": {
+                        "client_id": tenant_row[0],
+                        "company_name": tenant_row[1],
+                        "subscription_status": tenant_row[2],
+                        "lifecycle_status": tenant_row[3] or "active",
+                        "created_at": str(tenant_row[4]) if tenant_row[4] is not None else None,
+                    }
+                }
+                existing = _existing_tables(conn)
+                for table in _TENANT_SCOPED_TABLES:
+                    exclude = ()
+                    if table == "users":
+                        exclude = ("password_hash",)
+                    elif table == "api_keys":
+                        exclude = ("key_hash", "key_prefix")
+                    result[table] = _rows_to_dicts(conn, table, client_id, exclude, existing=existing)
+                return result
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_export)
+
+
+async def delete_tenant_permanently(client_id: str) -> Optional[dict]:
+    """
+    TEN-03: real, permanent, cascading hard-delete -- every row this
+    tenant owns across every client_id-scoped table (see
+    _TENANT_SCOPED_TABLES above), then the tenants row itself, all inside
+    ONE transaction so a failure partway through leaves nothing
+    half-deleted (same BEGIN/COMMIT/ROLLBACK discipline as
+    create_tenant_and_owner). Returns None if the tenant doesn't exist;
+    otherwise returns {"deleted": True, "counts": {table: rows_deleted}}
+    so the caller (and the owner who just did this) has a real receipt of
+    what was removed, not just a bare success flag.
+
+    Caller (backend/accounts.py's DELETE /api/v1/tenant) is responsible
+    for the human-facing confirmation step (re-typing the company name) --
+    this function itself does not ask for confirmation; it deletes
+    unconditionally once called, by design, so there is exactly one place
+    in the codebase that can accidentally skip that confirmation, and it
+    is not this one.
+    """
+    lock = get_db_lock()
+
+    def _delete():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                exists = conn.execute("SELECT 1 FROM tenants WHERE client_id = ?", [client_id]).fetchone()
+                if not exists:
+                    return None
+                existing = _existing_tables(conn)
+                counts = {}
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    for table in _TENANT_SCOPED_TABLES:
+                        if table not in existing:
+                            counts[table] = 0
+                            continue
+                        n = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE client_id = ?", [client_id]).fetchone()[0]
+                        conn.execute(f"DELETE FROM {table} WHERE client_id = ?", [client_id])
+                        counts[table] = n
+                    conn.execute("DELETE FROM tenants WHERE client_id = ?", [client_id])
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+                return {"deleted": True, "counts": counts}
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_delete)
 
 
 # BYOK-01 -- storage only. These functions read/write the encrypted column
@@ -859,10 +1924,100 @@ async def verify_lineage_chain(client_id: str) -> dict:
 
 
 def _parse_amount_series(series: pd.Series) -> pd.Series:
+    """
+    DATA-07 (currency): strips the currency symbols this product actually
+    sees in practice ($, €, £, ¥) and thousands-separator commas, and
+    converts accounting-style parenthetical negatives ("(120.00)" ->
+    "-120.00") before numeric parsing. Deliberately does NOT attempt
+    locale-aware decimal-comma parsing (e.g. European "1.234,56") -- that
+    format is genuinely ambiguous against the US "1,234.56" convention
+    without an explicit locale hint, and silently guessing wrong would
+    corrupt real financial amounts. Still genuinely open; a file using
+    that convention will parse as a wrong number rather than erroring, so
+    this is disclosed here rather than assumed handled.
+
+    DATA-07 (precision): rounds to 2 decimal places after parsing -- a
+    real ledger amount has no meaningful sub-cent precision, and without
+    this, ordinary floating-point arithmetic on the ingested values
+    (e.g. 19.1 - 19.0) can drift to something like 19.099999999999998
+    that then displays with a stray trailing digit downstream.
+    """
     text = series.astype(str).str.strip()
     text = text.str.replace(r'^\((.*)\)$', r'-\1', regex=True)
-    text = text.str.replace(r'[\$,]', '', regex=True)
-    return pd.to_numeric(text, errors='coerce')
+    text = text.str.replace(r'[\$,€£¥]', '', regex=True)
+    parsed = pd.to_numeric(text, errors='coerce')
+    return parsed.round(2)
+
+
+# DATA-07 (date): every existing date-based query in this module (MRR
+# trend, cash-flow, forecasting inputs, etc.) filters with DuckDB's
+# TRY_CAST(date AS DATE) -- which only reliably recognizes ISO-style
+# ("2026-01-15") strings. Before this, the 'date' column was stored
+# verbatim from whatever the source file happened to contain, so a
+# perfectly legitimate export using "01/15/2026", "15-Jan-2026", or
+# "Jan 15, 2026" style dates silently failed every TRY_CAST downstream --
+# those rows quietly vanished from every date-filtered view with no error
+# and no visibility into why. This list is tried in order, most specific
+# first, and covers the formats real bank/accounting exports actually use.
+#
+# Slash-style dates are genuinely ambiguous (01/02/2026: Jan 2, or Feb 1?).
+# Resolved MM/DD/YYYY first (the more common convention for this product's
+# target exports); a value that fails MM/DD but succeeds DD/MM is accepted
+# as DD/MM. This is a disclosed heuristic, not a guarantee of correctness
+# for every locale -- still open, not silently assumed solved.
+_DATE_FORMATS = [
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%m/%d/%Y",
+    "%d/%m/%Y",
+    "%m-%d-%Y",
+    "%d-%m-%Y",
+    "%m/%d/%y",
+    "%d/%m/%y",
+    "%b %d, %Y",
+    "%B %d, %Y",
+    "%d %b %Y",
+    "%d %B %Y",
+    "%d-%b-%Y",
+    "%d-%b-%y",
+]
+
+
+def _normalize_date_series(series: pd.Series) -> "tuple[pd.Series, int]":
+    """
+    Returns (normalized_series, unparseable_count). Every value that
+    matches one of _DATE_FORMATS (or, failing that, pandas' own general
+    date parser -- catching the remaining reasonable cases, e.g. ISO
+    strings with a time component) is rewritten to canonical ISO
+    (YYYY-MM-DD). A value that is present but matches nothing is stored
+    as None (genuinely unknown -- never guessed at), consistent with this
+    codebase's existing NULL philosophy for is_recurring and unparseable
+    amounts: the row is NOT dropped for this alone (its amount/category/
+    description are still real data), it just won't appear in date-
+    filtered views. The caller surfaces unparseable_count so this stays
+    visible to the user rather than a silent hole.
+    """
+    unparseable_count = 0
+
+    def _parse_one(v):
+        nonlocal unparseable_count
+        text = str(v).strip()
+        if not text:
+            unparseable_count += 1
+            return None
+        for fmt in _DATE_FORMATS:
+            try:
+                return datetime.strptime(text, fmt).date().isoformat()
+            except ValueError:
+                continue
+        try:
+            parsed = pd.to_datetime(text, errors="raise")
+            return parsed.date().isoformat()
+        except (ValueError, TypeError):
+            unparseable_count += 1
+            return None
+
+    return series.apply(_parse_one), unparseable_count
 
 
 # FIN-01: real Monthly Recurring Revenue requires knowing whether EACH
@@ -925,22 +2080,38 @@ def _read_csv_or_raise(file_path: str) -> pd.DataFrame:
     Converts the specific, well-known pandas failure modes into a single
     ValueError with an actionable message; main.py now maps ValueError to
     a 400 with this exact detail instead of a generic 500.
+
+    DATA-07 (encoding): tries UTF-8 first (unchanged from before -- the
+    common case, and any already-working file decodes identically), then
+    falls back through a short, disclosed list of encodings real-world
+    exports actually use (Windows-1252, then Latin-1) before giving up.
+    Latin-1 never itself raises UnicodeDecodeError (every byte maps to a
+    codepoint), so it's a genuine last resort, not a silent guess-and-hope
+    -- it's tried last, after two more likely candidates, specifically so
+    a Windows-origin export (the actual common source of "not UTF-8" ledger
+    files) decodes correctly rather than falling straight to the crudest
+    fallback.
     """
-    try:
-        return pd.read_csv(file_path)
-    except pd.errors.EmptyDataError:
-        raise ValueError("This file is empty -- no header row or data was found.")
-    except pd.errors.ParserError as e:
-        raise ValueError(
-            f"This file could not be parsed as a valid CSV: {e}. This usually means "
-            "some rows have a different number of columns than the header row "
-            "(a ragged/malformed file), or the file uses an unexpected delimiter."
-        )
-    except UnicodeDecodeError as e:
-        raise ValueError(
-            f"This file's text encoding could not be read ({e}). Try re-saving it as "
-            "UTF-8 CSV and uploading again."
-        )
+    encodings_to_try = ["utf-8", "cp1252", "latin-1"]
+    last_error = None
+    for encoding in encodings_to_try:
+        try:
+            return pd.read_csv(file_path, encoding=encoding)
+        except pd.errors.EmptyDataError:
+            raise ValueError("This file is empty -- no header row or data was found.")
+        except pd.errors.ParserError as e:
+            raise ValueError(
+                f"This file could not be parsed as a valid CSV: {e}. This usually means "
+                "some rows have a different number of columns than the header row "
+                "(a ragged/malformed file), or the file uses an unexpected delimiter."
+            )
+        except UnicodeDecodeError as e:
+            last_error = e
+            continue
+    raise ValueError(
+        f"This file's text encoding could not be read ({last_error}). Tried UTF-8, "
+        "Windows-1252, and Latin-1. Try re-saving it as UTF-8 CSV and uploading again."
+    )
 
 
 # Track 3 (multi-format ingestion): supported upload extensions, checked
@@ -1134,6 +2305,10 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
             )
 
         df.columns = [c.strip().lower() for c in df.columns]
+        # DATA-02: resolve known aliases to their canonical name -- see
+        # HEADER_ALIAS_MAP's own module-level docstring/comment for why
+        # this runs here (after strip+lower, before the duplicate check).
+        df.columns = [HEADER_ALIAS_MAP.get(c, c) for c in df.columns]
 
         # DATA-03: duplicate column names after normalization would silently
         # shadow each other during the amount/category/date lookups below
@@ -1166,8 +2341,9 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
                 # guessing which column represents money.
                 raise ValueError(
                     "CSV must contain a recognized amount column ('amount', 'revenue', "
-                    "'revenue' + 'expense', 'cost', or 'expense') so ingestion doesn't have "
-                    "to guess which column represents the financial amount. "
+                    "'revenue' + 'expense', 'cost', or 'expense' -- or a common alias like "
+                    "'amt', 'income', 'sales', 'expenses', or 'costs') so ingestion doesn't "
+                    "have to guess which column represents the financial amount. "
                     f"Columns found: {list(df.columns)}."
                 )
         today_str = date.today().isoformat()
@@ -1187,9 +2363,17 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
         else:
             recurring_series = pd.Series([None] * len(df), index=df.index, dtype="object")
 
+        # DATA-07 (date): missing dates still default to today (existing,
+        # unchanged behavior) -- normalization below then rewrites whatever
+        # format survives to canonical ISO, or NULL if it's present but
+        # genuinely unrecognized (see _normalize_date_series's own
+        # docstring for why that doesn't drop the row).
+        raw_date_series = df['date'].fillna(today_str).astype(str)
+        normalized_dates, date_unparseable_count = _normalize_date_series(raw_date_series)
+
         clean_df = pd.DataFrame({
             'client_id': client_id,
-            'date': df['date'].fillna(today_str).astype(str),
+            'date': normalized_dates,
             'category': df['category'].fillna('Uncategorized').astype(str),
             'amount': _parse_amount_series(df['amount']),
             'description': df['description'].fillna('Uploaded ledger entry').astype(str),
@@ -1267,6 +2451,13 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
     message = f"Successfully ingested {row_count} records for tenant '{client_id}'."
     if skipped_count:
         message += f" Skipped {skipped_count} row(s) with an unparseable amount value."
+    if date_unparseable_count:
+        message += (
+            f" Note: {date_unparseable_count} row(s) had a date value in a format that "
+            "couldn't be recognized -- those rows were still ingested (amount/category/"
+            "description are unaffected), but with an unknown date, so they won't appear "
+            "in date-filtered views until re-uploaded with a supported date format."
+        )
 
     # DATA-04: fingerprint-based duplicate notice -- the ingestion model is
     # (and remains) full delete-and-replace per tenant per upload, so
@@ -1307,7 +2498,10 @@ async def get_ledger_chart_context(client_id: str) -> dict:
                     "SELECT COUNT(*) FROM ledgers WHERE client_id = ?", [client_id]
                 ).fetchone()[0]
                 if row_count == 0:
-                    return {"row_count": 0, "category_breakdown": [], "monthly_totals": [], "unparseable_date_count": 0}
+                    return {
+                        "row_count": 0, "category_breakdown": [], "monthly_totals": [],
+                        "monthly_revenue_totals": [], "unparseable_date_count": 0,
+                    }
                 date_bounds = conn.execute("""
                     SELECT MIN(TRY_CAST(date AS DATE)), MAX(TRY_CAST(date AS DATE))
                     FROM ledgers WHERE client_id = ?
@@ -1326,6 +2520,25 @@ async def get_ledger_chart_context(client_id: str) -> dict:
                     GROUP BY month
                     ORDER BY month
                 """, [client_id]).fetchall()
+                # Revenue-ONLY monthly totals (amount > 0), separate from by_month above
+                # (which nets revenue and expense together). Added because
+                # /api/v1/finance/analytics-summary's month-over-month percentage was
+                # being computed from by_month's net figures while displayed directly
+                # beside total_revenue (a revenue-only number) -- on this tenant's real
+                # test ledger that produced a "+33.8%" reading right next to "Total
+                # Revenue $58,000" when actual revenue had fallen -32.9% month-over-month
+                # (confirmed against agents/saas_strategist.py's mom_change_pct, which
+                # already computed this correctly via its own WHERE amount > 0 query --
+                # mirrored here so get_ledger_chart_context's consumers, not just the
+                # SaaS Strategist agent, can use a real revenue-only trend figure).
+                by_month_revenue = conn.execute("""
+                    SELECT strftime(TRY_CAST(date AS DATE), '%Y-%m') as month,
+                           ROUND(SUM(amount), 2) as total_amount
+                    FROM ledgers
+                    WHERE client_id = ? AND TRY_CAST(date AS DATE) IS NOT NULL AND amount > 0
+                    GROUP BY month
+                    ORDER BY month
+                """, [client_id]).fetchall()
                 unparseable_dates = conn.execute("""
                     SELECT COUNT(*) FROM ledgers
                     WHERE client_id = ? AND TRY_CAST(date AS DATE) IS NULL
@@ -1339,6 +2552,9 @@ async def get_ledger_chart_context(client_id: str) -> dict:
                     ],
                     "monthly_totals": [
                         {"month": r[0], "total_amount": r[1]} for r in by_month
+                    ],
+                    "monthly_revenue_totals": [
+                        {"month": r[0], "total_amount": r[1]} for r in by_month_revenue
                     ],
                     "unparseable_date_count": int(unparseable_dates),
                 }
@@ -2662,3 +3878,174 @@ async def apply_category_suggestion(client_id: str, row_id: int, new_category: s
             finally:
                 conn.close()
     return await asyncio.to_thread(_update)
+
+
+# ---------------------------------------------------------------------------
+# INT-01: MCP read-only tool server -- scoped API keys.
+#
+# A separate credential type from the JWTs accounts.py issues on login.
+# An MCP client (Claude Desktop, another workflow tool) is not a logged-in
+# browser session, so it needs a long-lived, individually-revocable secret
+# instead of a short-lived per-login token. Only ever consumed by
+# backend/mcp_server.py's own auth middleware -- never accepted by any
+# other REST endpoint in this app, so a leaked key's blast radius is
+# limited to the read-only MCP tool surface, not the full mutating API.
+# ---------------------------------------------------------------------------
+
+API_KEY_PREFIX = "evta_live_"
+
+
+def _hash_api_key(raw_key: str) -> str:
+    """
+    SHA-256, not bcrypt. bcrypt's whole design point is slowing down
+    brute-force guessing of LOW-entropy human passwords -- it is the wrong
+    tool for a 256-bit random token nobody could ever brute-force in the
+    first place, and its 72-byte truncation (see auth.py's hash_password)
+    would silently and incorrectly truncate a token this long. A plain
+    fast hash is exactly right here: the token's own entropy is the
+    security property, not the hash function's slowness.
+    """
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+async def generate_api_key(client_id: str, label: str, created_by_user_id: int) -> dict:
+    """
+    Creates a new scoped API key for a tenant. Returns the RAW key exactly
+    once, in this return value -- only its hash is ever persisted, so a
+    caller that loses this response has no way to recover the key and must
+    generate a new one. key_prefix (the first 12 characters of the raw
+    key, e.g. "evta_live_ab") is stored in cleartext purely so a tenant can
+    tell their keys apart in a list UI without the full secret ever being
+    displayed or retrievable again.
+    """
+    if not client_id:
+        raise ValueError("client_id is required.")
+    await init_db()
+    raw_key = API_KEY_PREFIX + secrets.token_urlsafe(32)
+    key_hash = _hash_api_key(raw_key)
+    key_prefix = raw_key[:12]
+    lock = get_db_lock()
+    def _insert():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "INSERT INTO api_keys (client_id, label, key_prefix, key_hash, created_by_user_id) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "RETURNING key_id, created_at",
+                    [client_id, (label or "").strip()[:200] or None, key_prefix, key_hash, created_by_user_id],
+                ).fetchone()
+                return {"key_id": row[0], "created_at": row[1]}
+            finally:
+                conn.close()
+    inserted = await asyncio.to_thread(_insert)
+    return {
+        "key_id": inserted["key_id"],
+        "api_key": raw_key,
+        "key_prefix": key_prefix,
+        "label": (label or "").strip()[:200] or None,
+        "created_at": inserted["created_at"],
+    }
+
+
+async def list_api_keys(client_id: str) -> list:
+    """
+    Never returns the raw key or its hash -- key_prefix is the only
+    identifying fragment a tenant sees again after creation.
+    """
+    if not client_id:
+        raise ValueError("client_id is required.")
+    await init_db()
+    lock = get_db_lock()
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                rows = conn.execute(
+                    "SELECT key_id, label, key_prefix, created_at, last_used_at, revoked_at "
+                    "FROM api_keys WHERE client_id = ? ORDER BY created_at DESC",
+                    [client_id],
+                ).fetchall()
+                return [
+                    {
+                        "key_id": r[0],
+                        "label": r[1],
+                        "key_prefix": r[2],
+                        "created_at": r[3],
+                        "last_used_at": r[4],
+                        "revoked_at": r[5],
+                        "active": r[5] is None,
+                    }
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
+async def revoke_api_key(client_id: str, key_id: int) -> bool:
+    """
+    Soft-revoke (sets revoked_at) rather than a hard DELETE -- keeps the
+    row for audit purposes, same posture as every other "delete" in this
+    codebase (e.g. tenants are never hard-deleted either). Scoped to
+    client_id AND key_id together so one tenant can never revoke another
+    tenant's key even if they somehow learned its key_id. Returns False
+    (not an error) for a nonexistent/already-revoked/wrong-tenant key_id --
+    the caller decides whether that should surface as a 404.
+    """
+    if not client_id:
+        raise ValueError("client_id is required.")
+    if key_id is None:
+        raise ValueError("key_id is required.")
+    lock = get_db_lock()
+    def _revoke():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "UPDATE api_keys SET revoked_at = CURRENT_TIMESTAMP "
+                    "WHERE client_id = ? AND key_id = ? AND revoked_at IS NULL "
+                    "RETURNING key_id",
+                    [client_id, key_id],
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_revoke)
+
+
+async def get_client_id_for_api_key(raw_key: str) -> Optional[dict]:
+    """
+    Validates a presented raw key against the stored hash and returns the
+    owning tenant's client_id, or None for anything invalid: empty input,
+    unknown key, or a revoked key. Also stamps last_used_at on a
+    successful match -- best-effort telemetry, not security-critical, so a
+    failure to record it does not fail the auth check itself.
+    """
+    if not raw_key or not raw_key.startswith(API_KEY_PREFIX):
+        return None
+    key_hash = _hash_api_key(raw_key)
+    lock = get_db_lock()
+    def _lookup():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT key_id, client_id FROM api_keys "
+                    "WHERE key_hash = ? AND revoked_at IS NULL",
+                    [key_hash],
+                ).fetchone()
+                if row is None:
+                    return None
+                key_id, client_id = row
+                try:
+                    conn.execute(
+                        "UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE key_id = ?",
+                        [key_id],
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not stamp last_used_at for api key {key_id}: {e}")
+                return {"key_id": key_id, "client_id": client_id}
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_lookup)

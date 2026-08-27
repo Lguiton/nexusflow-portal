@@ -120,6 +120,102 @@ async def test_dollar_comma_and_parenthetical_negative_amounts_parsed(tmp_path, 
     assert rows["Office rent"] == pytest.approx(-500.00)
 
 
+# DATA-02: header alias resolution -- real coverage for HEADER_ALIAS_MAP.
+@pytest.mark.asyncio
+async def test_amt_alias_resolves_to_amount(tmp_path, isolated_db):
+    db = isolated_db
+    path = tmp_path / "amt_alias.csv"
+    path.write_text(
+        "date,category,amt,description\n"
+        "2026-01-05,Sales,1000,Widget sale\n",
+        encoding="utf-8",
+    )
+    msg = await db.ingest_csv_to_db(str(path), "CLI-TEST")
+    assert "Successfully ingested 1 records" in msg
+    rows = await db.get_ledger_rows("CLI-TEST")
+    assert rows["rows"][0]["amount"] == pytest.approx(1000.0)
+
+
+@pytest.mark.asyncio
+async def test_income_and_expenses_aliases_resolve_and_combine(tmp_path, isolated_db):
+    """'income' -> revenue, 'expenses' -> expense -- both real, common
+    accounting-export header names, neither an exact canonical match."""
+    db = isolated_db
+    path = tmp_path / "income_expenses.csv"
+    path.write_text(
+        "date,category,income,expenses,description\n"
+        "2026-01-05,Sales,1000,200,Net widget sale\n",
+        encoding="utf-8",
+    )
+    await db.ingest_csv_to_db(str(path), "CLI-TEST")
+    rows = await db.get_ledger_rows("CLI-TEST")
+    assert rows["rows"][0]["amount"] == pytest.approx(800.0)
+
+
+@pytest.mark.asyncio
+async def test_desc_cat_and_txn_date_aliases_all_resolve(tmp_path, isolated_db):
+    db = isolated_db
+    path = tmp_path / "aliased_headers.csv"
+    path.write_text(
+        "txn_date,cat,amount,desc\n"
+        "2026-01-05,Sales,1000,Widget sale\n",
+        encoding="utf-8",
+    )
+    await db.ingest_csv_to_db(str(path), "CLI-TEST")
+    rows = (await db.get_ledger_rows("CLI-TEST"))["rows"]
+    assert rows[0]["category"] == "Sales"
+    assert rows[0]["description"] == "Widget sale"
+    assert rows[0]["date"] == "2026-01-05"
+
+
+@pytest.mark.asyncio
+async def test_alias_and_canonical_header_for_the_same_column_is_a_real_duplicate(tmp_path, isolated_db):
+    """'amt' resolves to 'amount' -- a file with BOTH 'amount' and 'amt'
+    must still hit the existing duplicate-column rejection (DATA-03), not
+    silently pick one or merge them."""
+    db = isolated_db
+    path = tmp_path / "alias_dupe.csv"
+    path.write_text(
+        "date,category,amount,amt,description\n"
+        "2026-01-05,Sales,1000,1000,Widget sale\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate column"):
+        await db.ingest_csv_to_db(str(path), "CLI-TEST")
+
+
+@pytest.mark.asyncio
+async def test_costs_alias_resolves_to_cost_and_negates(tmp_path, isolated_db):
+    """'costs' -> cost, which _read_csv_or_raise treats like 'expense':
+    stored as a negative amount."""
+    db = isolated_db
+    path = tmp_path / "costs_alias.csv"
+    path.write_text(
+        "date,category,costs,description\n"
+        "2026-01-05,Rent,500,Office rent\n",
+        encoding="utf-8",
+    )
+    await db.ingest_csv_to_db(str(path), "CLI-TEST")
+    rows = await db.get_ledger_rows("CLI-TEST")
+    assert rows["rows"][0]["amount"] == pytest.approx(-500.0)
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognized_header_is_not_silently_aliased(tmp_path, isolated_db):
+    """A generic word like 'total' is deliberately NOT in HEADER_ALIAS_MAP
+    (see its own module-level comment) -- it must still hit the real
+    no-recognized-amount-column rejection, not be guessed as 'amount'."""
+    db = isolated_db
+    path = tmp_path / "unrecognized_header.csv"
+    path.write_text(
+        "date,category,total,description\n"
+        "2026-01-05,Sales,1000,Widget sale\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="recognized amount column"):
+        await db.ingest_csv_to_db(str(path), "CLI-TEST")
+
+
 @pytest.mark.asyncio
 async def test_all_unparseable_amounts_rejected_not_silently_zero(tmp_path, isolated_db):
     db = isolated_db

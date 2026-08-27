@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from "react";
 import {
-  BarChart, Bar, PieChart, Pie, Cell, ComposedChart, Line,
+  BarChart, Bar, PieChart, Pie, Cell, ComposedChart, Line, Rectangle,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
 import {
@@ -33,6 +33,41 @@ import BoxPlotChart from "./BoxPlotChart";
 const COLORS = ["#5b6ef0", "#7d8cf5", "#f2596b", "#8b6ef5", "#f0a93b", "#2fd199", "#33c1f0", "#5fd3ff"];
 
 type ChartKind = "bar" | "pie" | "donut" | "pareto" | "stacked" | "box";
+
+// BUG FIX (27 Aug 2026): the Bar view's YAxis had no tickFormatter at all --
+// every other chart on the dashboard (Transaction Scatter, Pareto's left
+// axis) formats its numbers as currency, but this one showed bare signed
+// integers. Harmless in itself, but category_breakdown mixes positive
+// revenue and negative expense totals (see the directionalBarShape note
+// below), so a negative tick renders as e.g. "-40000" with no "$" -- easy
+// to misread as a second positive tick, especially once real screenshots
+// get cropped and the leading "-" sits right at the crop edge. Confirmed
+// via a live render: without this formatter the axis is numerically
+// correct and monotonic, but visually ambiguous. maximumFractionDigits: 0
+// matches the Pie/Donut tooltip's existing currency formatting elsewhere
+// in this same file.
+const formatCurrencyTick = (v: number) =>
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(v);
+
+// BUG FIX (confirmed live 26 Aug 2026): category_breakdown mixes revenue
+// (positive) and expense (negative) category totals. Recharts draws a
+// negative bar's rectangle downward from the zero baseline -- its "top"
+// edge (in the [topLeft, topRight, bottomRight, bottomLeft] radius sense)
+// sits AT the baseline, and its "bottom" edge is the bar's actual tip, far
+// from zero. A fixed radius=[4,4,0,0] rounds the corners nearest zero
+// regardless of sign, which is correct for a positive bar (tip is at the
+// top) but rounds the WRONG end of a negative bar -- confirmed via a
+// rendered repro against this tenant's real data: the large negative
+// Payroll bar had its near-zero end rounded and its actual tip left sharp,
+// reading as visually "flipped" next to every positive bar in the same
+// chart. This swaps which end gets rounded based on the real signed value,
+// so the rounded end is always the bar's tip, never its base.
+const directionalBarShape = (key: string) => (props: any) => {
+  const { x, y, width, height, payload, fill } = props;
+  const value = payload?.[key] ?? 0;
+  const radius: [number, number, number, number] = value < 0 ? [0, 0, 4, 4] : [4, 4, 0, 0];
+  return <Rectangle x={x} y={y} width={width} height={height} radius={radius} fill={fill} />;
+};
 
 interface ChartSectionLike {
   config: { xAxisKey: string; dataKeys: string[] };
@@ -82,6 +117,26 @@ export default function CategoryChartPicker({ data, config, stackedSection, boxS
     });
   }, [data, valueKey]);
 
+  // BUG FIX (confirmed live 26 Aug 2026): category_breakdown mixes revenue
+  // (positive) and expense (negative) category totals in one chart -- a pie
+  // slice's size can't be negative, so Pie/Donut rendered nothing but their
+  // legend for any tenant with both revenue and expense categories (i.e.
+  // every real tenant). Confirmed via a rendered repro against this
+  // tenant's real category_breakdown before this fix: blank chart area,
+  // legend only. Fixed by sizing slices on magnitude (Math.abs) so every
+  // category actually renders a slice; the tooltip below still shows the
+  // REAL signed dollar amount (via _realAmount, not the magnitude used for
+  // sizing), so a slice never gets relabeled as if it were revenue.
+  const pieData = useMemo(
+    () => data.map((row) => ({ ...row, _magnitude: Math.abs(row[valueKey] ?? 0), _realAmount: row[valueKey] ?? 0 })),
+    [data, valueKey]
+  );
+  const pieTooltipFormatter = (value: any, name: any, itemProps: any) => {
+    const real = itemProps?.payload?._realAmount ?? value;
+    const formatted = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(real);
+    return [formatted, name];
+  };
+
   if (!data || data.length === 0) {
     return <div className="text-slate-500 text-sm p-4 text-center font-mono">No data available for visualization.</div>;
   }
@@ -122,12 +177,12 @@ export default function CategoryChartPicker({ data, config, stackedSection, boxS
 
       {effectiveKind === "bar" && (
         <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+          <BarChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
             <XAxis dataKey={config.xAxisKey} stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} />
-            <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} />
-            <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#1e293b", color: "#f8fafc", borderRadius: "8px" }} cursor={{ fill: "#1e293b" }} />
-            <Bar dataKey={valueKey} radius={[4, 4, 0, 0]}>
+            <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} tickFormatter={formatCurrencyTick} width={64} />
+            <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#1e293b", color: "#f8fafc", borderRadius: "8px" }} cursor={{ fill: "#1e293b" }} formatter={(value: any) => formatCurrencyTick(Number(value))} />
+            <Bar dataKey={valueKey} shape={directionalBarShape(valueKey)}>
               {data.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
             </Bar>
           </BarChart>
@@ -137,37 +192,47 @@ export default function CategoryChartPicker({ data, config, stackedSection, boxS
       {effectiveKind === "pie" && (
         <ResponsiveContainer width="100%" height={260}>
           <PieChart>
-            <Pie data={data} cx="50%" cy="50%" outerRadius={90} paddingAngle={2} dataKey={valueKey} nameKey={config.xAxisKey}>
-              {data.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
+            <Pie data={pieData} cx="50%" cy="50%" outerRadius={90} paddingAngle={2} dataKey="_magnitude" nameKey={config.xAxisKey}>
+              {pieData.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
             </Pie>
-            <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#1e293b", color: "#f8fafc", borderRadius: "8px" }} />
+            <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#1e293b", color: "#f8fafc", borderRadius: "8px" }} formatter={pieTooltipFormatter} />
             <Legend wrapperStyle={{ fontSize: "11px", color: "#94a3b8" }} />
           </PieChart>
         </ResponsiveContainer>
+      )}
+      {effectiveKind === "pie" && (
+        <p className="text-[10px] text-slate-500 mt-1 text-center">
+          Slice size reflects dollar magnitude, revenue and expense categories combined -- hover a slice for its real signed amount.
+        </p>
       )}
 
       {effectiveKind === "donut" && (
         <ResponsiveContainer width="100%" height={260}>
           <PieChart>
-            <Pie data={data} cx="50%" cy="50%" innerRadius={55} outerRadius={80} paddingAngle={4} dataKey={valueKey} nameKey={config.xAxisKey}>
-              {data.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
+            <Pie data={pieData} cx="50%" cy="50%" innerRadius={55} outerRadius={80} paddingAngle={4} dataKey="_magnitude" nameKey={config.xAxisKey}>
+              {pieData.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
             </Pie>
-            <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#1e293b", color: "#f8fafc", borderRadius: "8px" }} />
+            <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#1e293b", color: "#f8fafc", borderRadius: "8px" }} formatter={pieTooltipFormatter} />
             <Legend wrapperStyle={{ fontSize: "11px", color: "#94a3b8" }} />
           </PieChart>
         </ResponsiveContainer>
       )}
+      {effectiveKind === "donut" && (
+        <p className="text-[10px] text-slate-500 mt-1 text-center">
+          Slice size reflects dollar magnitude, revenue and expense categories combined -- hover a slice for its real signed amount.
+        </p>
+      )}
 
       {effectiveKind === "pareto" && (
         <ResponsiveContainer width="100%" height={260}>
-          <ComposedChart data={paretoData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+          <ComposedChart data={paretoData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
             <XAxis dataKey={config.xAxisKey} stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} />
-            <YAxis yAxisId="left" stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} />
+            <YAxis yAxisId="left" stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} tickFormatter={formatCurrencyTick} width={64} />
             <YAxis yAxisId="right" orientation="right" stroke="#2fd199" fontSize={11} tickLine={false} axisLine={false} domain={[0, 100]} unit="%" />
             <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#1e293b", color: "#f8fafc", borderRadius: "8px" }} />
             <Legend wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }} />
-            <Bar yAxisId="left" dataKey={valueKey} name="Category total" fill="#5b6ef0" radius={[4, 4, 0, 0]} />
+            <Bar yAxisId="left" dataKey={valueKey} name="Category total" fill="#5b6ef0" shape={directionalBarShape(valueKey)} />
             <Line yAxisId="right" type="monotone" dataKey="cumulative_pct" name="Cumulative %" stroke="#2fd199" strokeWidth={2.5} dot={{ r: 3, fill: "#0f172a", strokeWidth: 2, stroke: "#2fd199" }} />
           </ComposedChart>
         </ResponsiveContainer>
@@ -175,10 +240,10 @@ export default function CategoryChartPicker({ data, config, stackedSection, boxS
 
       {effectiveKind === "stacked" && hasStacked && (
         <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={stackedSection!.data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+          <BarChart data={stackedSection!.data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
             <XAxis dataKey={stackedSection!.config.xAxisKey} stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} />
-            <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} />
+            <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} tickFormatter={formatCurrencyTick} width={64} />
             <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#1e293b", color: "#f8fafc", borderRadius: "8px" }} cursor={{ fill: "#1e293b" }} />
             <Legend wrapperStyle={{ fontSize: "11px", paddingTop: "8px" }} />
             {stackedSection!.config.dataKeys.map((cat, idx) => (
