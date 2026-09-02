@@ -46,8 +46,11 @@ const AnalystTable = ({ artifacts }: { artifacts: any }) => {
             <tr key={i} className="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors">
               {headers.map((header) => (
                 <td key={header + i} className="px-6 py-4">
+                  {/* eslint-disable-next-line security/detect-object-injection -- header comes from Object.keys(results[0]) -- reading the object's own real keys back off itself, not attacker-controlled */}
                   {typeof row[header] === 'number' 
+                    // eslint-disable-next-line security/detect-object-injection -- header comes from Object.keys(results[0]) -- reading the object's own real keys back off itself, not attacker-controlled
                     ? row[header].toLocaleString(undefined, { maximumFractionDigits: 2 }) 
+                    // eslint-disable-next-line security/detect-object-injection -- header comes from Object.keys(results[0]) -- reading the object's own real keys back off itself, not attacker-controlled
                     : row[header]}
                 </td>
               ))}

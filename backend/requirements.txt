@@ -44,3 +44,10 @@ mcp<2
 # founder's still-pending email/SMS provider accounts.
 pyotp<3
 qrcode[pil]<8
+# REP-01: real PDF generation for /api/v1/reports/stakeholder/export. Pure-
+# Python (no system libs like cairo/pango a WeasyPrint-style renderer would
+# need, which the production Dockerfile's python:3.11-slim base doesn't
+# install) -- installs cleanly with pip alone. CSV export reuses pandas,
+# already a dependency; pdfplumber (also already present) is PDF *reading*
+# only, unrelated to this.
+reportlab<6

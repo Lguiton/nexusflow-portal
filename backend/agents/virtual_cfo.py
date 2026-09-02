@@ -3,7 +3,7 @@ import re
 import json
 import logging
 import duckdb
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 
 try:
@@ -200,7 +200,45 @@ def _error_state_response(reason: str) -> Dict[str, Any]:
     }
 
 
-def generate_cfo_briefing(client_id: str = "default_client") -> Dict[str, Any]:
+def _format_history_for_prompt(conversation_history: Optional[List[Dict[str, Any]]]) -> str:
+    """
+    AI-08 mechanical follow-up: identical implementation to bi_engineer.py's
+    _format_history_for_prompt (Track 4's original wiring) -- renders the
+    last few real turns of this session (fetched by orchestrator.route_query
+    from db_manager.get_conversation_history) as plain transcript text for
+    the narrative LLM prompt below. Duplicated per-agent rather than
+    centralized, matching this codebase's own accepted precedent (see the
+    AI_REQUEST_TIMEOUT_SECONDS/AI_MAX_RETRIES duplication across all 8 agent
+    files, called out as a disclosed code-quality nit, not a functional gap,
+    in the AI-03 correction).
+    """
+    if not conversation_history:
+        return ""
+    lines = []
+    for turn in conversation_history:
+        role = turn.get("role", "user")
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return "\n    Recent conversation in this session (oldest first):\n    " + "\n    ".join(lines)
+
+
+def generate_cfo_briefing(
+    client_id: str = "default_client",
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    AI-08 (27 Aug 2026): `conversation_history` (optional, default None) is
+    real prior turns for this session -- when present it's included in the
+    narrative LLM prompt below so a follow-up question resolves against what
+    was actually asked/answered before in this session, instead of being
+    answered blind every time. Callers that don't pass it keep today's exact
+    behavior -- additive, not a breaking change. Mechanical follow-up to
+    Track 4's original BI Engineer wiring (see bi_engineer.py).
+    """
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
 
     total_revenue = 0.0
@@ -389,11 +427,13 @@ def generate_cfo_briefing(client_id: str = "default_client") -> Dict[str, Any]:
     burn_rate = total_cogs + total_opex
     cash_runway_months = (ASSUMED_CASH_RESERVES / burn_rate) if burn_rate > 0 else 99.9
 
+    history_block = _format_history_for_prompt(conversation_history)
     system_prompt = f"""
     You are Eivanta's elite Virtual Chief Financial Officer (CFO).
     Tenant: {safe_client_id}. Reporting month: {reporting_month}.
     Calculated Metrics for {reporting_month} ONLY (not lifetime-to-date) -> Revenue: ${total_revenue:,.2f}, COGS: ${total_cogs:,.2f}, OPEX: ${total_opex:,.2f}, Gross Margin: {gross_margin:.1f}%, Burn Rate: ${burn_rate:,.2f}, Runway: {cash_runway_months:.1f} months.
     IMPORTANT: the runway figure assumes a hypothetical ${ASSUMED_CASH_RESERVES:,.2f} cash reserve, not this tenant's actual bank balance (the system does not yet ingest real cash-balance data). Any insight referencing runway must state this is an estimate based on an assumed reserve, not a confirmed cash position. Every insight must describe {reporting_month}, not the tenant's all-time history.
+    {history_block}
 
     Generate EXACTLY 3 strategic executive insights based on these exact numbers.
     Respond in pure JSON:

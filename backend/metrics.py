@@ -3,9 +3,9 @@ from pydantic import BaseModel
 import logging
 
 try:
-    from .db_manager import get_total_ingested_rows, get_advanced_telemetry, init_telemetry_schema, get_ai_usage_summary
+    from .db_manager import get_total_ingested_rows, get_advanced_telemetry, get_ai_usage_summary
 except ImportError:
-    from db_manager import get_total_ingested_rows, get_advanced_telemetry, init_telemetry_schema, get_ai_usage_summary
+    from db_manager import get_total_ingested_rows, get_advanced_telemetry, get_ai_usage_summary
 
 try:
     from .agent_registry import agent_registry
@@ -20,16 +20,13 @@ except ImportError:
 router = APIRouter()
 logger = logging.getLogger("eivanta.metrics")
 
-
-@router.on_event("startup")
-async def _startup_init_telemetry():
-    # Moved out of a module-level `asyncio.create_task(...)`, which ran at
-    # IMPORT time -- before uvicorn's event loop exists -- and would raise
-    # "RuntimeError: no running event loop" on startup, likely crashing this
-    # router (and possibly the whole app, since main.py's try/except around
-    # loading this router only catches ImportError, not RuntimeError).
-    # Startup events run inside the real event loop, after it's live.
-    await init_telemetry_schema()
+# OPS-09 (27 Aug 2026): telemetry-schema init used to be registered here via
+# the deprecated `@router.on_event("startup")` hook. That's gone -- the init
+# call now lives in backend/main.py's app-level `lifespan` context manager
+# instead (see _metrics_router_loaded / _lifespan there), which already
+# existed for INT-01's MCP session-manager startup/shutdown and runs after
+# the same real event loop this router's old handler needed. No behavior
+# change: still runs once, still only if this router successfully loaded.
 
 
 class IngestionMetrics(BaseModel):
@@ -47,7 +44,7 @@ class SwarmMetrics(BaseModel):
     telemetry_window_stats: dict
 
 
-@router.get("/api/v1/metrics/ingestion", response_model=IngestionMetrics)
+@router.get("/api/v1/metrics/ingestion", tags=["Telemetry & Metrics"], response_model=IngestionMetrics)
 async def get_ingestion_metrics(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
     # RBAC-01: this endpoint's own prior comment predicted exactly this --
     # get_total_ingested_rows() returns a platform-wide total across ALL
@@ -66,7 +63,7 @@ async def get_ingestion_metrics(user: AuthenticatedUser = Depends(require_role("
         raise HTTPException(status_code=500, detail="Failed to fetch metrics")
 
 
-@router.get("/api/v1/metrics/swarm", response_model=SwarmMetrics)
+@router.get("/api/v1/metrics/swarm", tags=["Telemetry & Metrics"], response_model=SwarmMetrics)
 async def get_swarm_metrics(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
     # RBAC-01: same platform-wide-not-per-tenant posture and same partial
     # fix as get_ingestion_metrics above -- see its comment.
@@ -103,7 +100,7 @@ async def get_swarm_metrics(user: AuthenticatedUser = Depends(require_role("owne
         raise HTTPException(status_code=500, detail="Failed to fetch swarm telemetry")
 
 
-@router.get("/api/v1/metrics/ai-usage")
+@router.get("/api/v1/metrics/ai-usage", tags=["Telemetry & Metrics"])
 async def get_ai_usage_metrics(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
     # AI-06 + RBAC-01: same platform-wide-not-per-tenant posture and same
     # partial fix as the two metrics endpoints above -- see get_ingestion_metrics's comment.

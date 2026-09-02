@@ -117,12 +117,12 @@ def _in_running_loop() -> bool:
         return False
 
 
-def _sync_log_query_audit(client_id: str, natural_language_query: str, generated_query: str, row_count: int, status: str):
+def _sync_log_query_audit(client_id: str, natural_language_query: str, generated_query: str, row_count: int, status: str, user_id: Optional[int] = None):
     if _in_running_loop():
         logger.warning("BI Engineer: query audit log skipped -- already inside a running event loop.")
         return
     try:
-        asyncio.run(log_query_audit(client_id, natural_language_query, generated_query, row_count, status))
+        asyncio.run(log_query_audit(client_id, natural_language_query, generated_query, row_count, status, user_id))
     except Exception as e:
         logger.error(f"BI Engineer: failed to write query audit log: {e}")
 
@@ -139,6 +139,12 @@ def _ask_llm_for_query_intent(client_id: str, query: str) -> Optional[dict]:
     if not client:
         return None
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
+    # SEC-03 SAST (28 Aug 2026): bandit B608 flags this -- false positive.
+    # This is an LLM prompt string, not a SQL statement (its later mention
+    # of SELECT/table names is instructional text for the model, which
+    # never writes SQL itself -- see _validate_intent's docstring and the
+    # real query-building function below, both already covered by SQL-01).
+    # safe_client_id is also already alnum/hyphen/underscore-filtered.
     system_prompt = f"""
     You are translating a natural-language question about tenant {safe_client_id}'s
     financial ledger into a STRICT structured query intent. You do NOT write SQL --
@@ -304,11 +310,21 @@ def _build_sql_from_intent(intent: dict, client_id: str) -> Tuple[str, list]:
             where_clauses.append(f"{sql_col} {sql_op} ?")
             params.append(f["value"])
 
-    sql = f"SELECT {', '.join(select_exprs)} FROM ledgers WHERE {' AND '.join(where_clauses)}"
+    # SEC-03 SAST (28 Aug 2026): bandit B608 flags every f-string SQL build
+    # below -- false positive, per the docstring above and _validate_intent:
+    # select_exprs/where_clauses/group_by_exprs are built exclusively from
+    # the fixed _METRIC_SQL/_ROW_COLUMN_SQL/_GROUP_BY_SQL/_FILTER_COLUMN_SQL
+    # vocab dicts (Python source constants, never runtime/user input), and
+    # order_by's column/direction are constrained to already-validated keys
+    # (valid_order_targets) plus a hardcoded ASC/DESC check. Every real DATA
+    # value (params list, f["value"]) is always bound as a `?` parameter,
+    # never interpolated -- this is exactly SQL-01's shipped whitelist
+    # design, not a gap.
+    sql = f"SELECT {', '.join(select_exprs)} FROM ledgers WHERE {' AND '.join(where_clauses)}"  # nosec B608
     if group_by_exprs:
-        sql += f" GROUP BY {', '.join(group_by_exprs)}"
+        sql += f" GROUP BY {', '.join(group_by_exprs)}"  # nosec B608
     if intent["order_by"]:
-        sql += f" ORDER BY {intent['order_by']['column']} {intent['order_by']['direction']}"
+        sql += f" ORDER BY {intent['order_by']['column']} {intent['order_by']['direction']}"  # nosec B608
     # limit was already coerced to an int and clamped to [1, 500] by
     # _safe_limit inside _validate_intent -- unlike every data VALUE above
     # (always bound as a `?` parameter), embedding this validated integer
@@ -318,23 +334,29 @@ def _build_sql_from_intent(intent: dict, client_id: str) -> Tuple[str, list]:
     return sql, params
 
 
-def _answer_data_question(client_id: str, query: str) -> Dict[str, Any]:
+def _answer_data_question(client_id: str, query: str, user_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Top-level entry point for the folded-in Data Analyst duties. Every
     attempt -- success, whitelist rejection, LLM failure, or execution
     error -- is recorded via the SQL-03 audit trail before returning.
+
+    `user_id` (added 27 Aug 2026, SQL-03): the authenticated user who asked
+    this question, when known -- threaded straight through to every audit
+    write below. Optional and defaults to None so existing callers that
+    don't yet have a user_id (e.g. tooling/regression scripts) keep working
+    unchanged; the audit row's user_id is simply NULL in that case.
     """
     if not query or not query.strip():
         return {"status": "NO_QUESTION_ASKED"}
 
     raw_intent = _ask_llm_for_query_intent(client_id, query)
     if raw_intent is None:
-        _sync_log_query_audit(client_id, query, "N/A", 0, "LLM_UNAVAILABLE_OR_FAILED")
+        _sync_log_query_audit(client_id, query, "N/A", 0, "LLM_UNAVAILABLE_OR_FAILED", user_id)
         return {"status": "COULD_NOT_ANSWER", "reason": "Query understanding is unavailable right now."}
 
     intent, reason = _validate_intent(raw_intent)
     if intent is None:
-        _sync_log_query_audit(client_id, query, f"REJECTED: {reason}", 0, "REJECTED_BY_WHITELIST")
+        _sync_log_query_audit(client_id, query, f"REJECTED: {reason}", 0, "REJECTED_BY_WHITELIST", user_id)
         return {"status": "COULD_NOT_ANSWER", "reason": reason}
 
     sql, params = _build_sql_from_intent(intent, client_id)
@@ -356,11 +378,11 @@ def _answer_data_question(client_id: str, query: str) -> Dict[str, Any]:
                 conn.close()
     except Exception as e:
         logger.error(f"BI Engineer: query execution failed for {client_id}: {e}")
-        _sync_log_query_audit(client_id, query, sql, 0, "EXECUTION_ERROR")
+        _sync_log_query_audit(client_id, query, sql, 0, "EXECUTION_ERROR", user_id)
         return {"status": "COULD_NOT_ANSWER", "reason": "The generated query failed to execute."}
 
     row_dicts = [dict(zip(columns, r)) for r in rows]
-    _sync_log_query_audit(client_id, query, sql, len(rows), "SUCCESS")
+    _sync_log_query_audit(client_id, query, sql, len(rows), "SUCCESS", user_id)
     return {
         "status": "ANSWERED",
         "columns": columns,
@@ -472,6 +494,7 @@ def generate_bi_summary(
     client_id: str = "default_client",
     query: str = "",
     conversation_history: Optional[List[Dict[str, Any]]] = None,
+    user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Agent #05 (BI Engineer). Two things happen here now:
@@ -487,6 +510,13 @@ def generate_bi_summary(
     against what was actually asked/answered before, instead of being
     answered blind every time. Callers that don't pass it (or pass none)
     get today's exact behavior -- this is additive, not a breaking change.
+
+    SQL-03 (27 Aug 2026): `user_id` (optional, default None) is the
+    authenticated user asking this question, if known -- threaded straight
+    through to _answer_data_question so the query_audit trail below can
+    attribute this question to a real user, not just a tenant. Callers
+    that don't pass it (e.g. tooling scripts) keep today's tenant-only
+    audit behavior unchanged.
 
     Note on cost: this now makes a second LLM call (query-intent
     translation) on every invocation where `query` is non-empty, even a
@@ -551,7 +581,7 @@ def generate_bi_summary(
     if not category_breakdown:
         return _empty_state_response()
 
-    query_answer = _answer_data_question(safe_client_id, query)
+    query_answer = _answer_data_question(safe_client_id, query, user_id)
 
     query_context_block = ""
     if query_answer.get("status") == "ANSWERED":

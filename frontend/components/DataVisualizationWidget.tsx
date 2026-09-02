@@ -181,6 +181,7 @@ export default function DataVisualizationWidget({ refreshTrigger = 0 }: DataVisu
               {chartEntries.map(([key, section]) => (
                 <div key={key} className="bg-slate-950/50 border border-slate-800/80 rounded-lg p-4">
                   <h3 className="text-sm font-semibold text-slate-300 mb-3">
+                    {/* eslint-disable-next-line security/detect-object-injection -- key is a backend chart-section name used only to look up a display label in a fixed local table, with a safe string fallback -- a read, not a write, so no prototype-sensitive effect */}
                     {PANEL_TITLES[key] || key}
                   </h3>
                   {key === "category_breakdown" ? (

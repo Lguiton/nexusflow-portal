@@ -305,6 +305,7 @@ export default function CognitiveSearchBar({ onQueryResult }: CognitiveSearchBar
             onBlur={() => setInputFocused(false)}
             maxLength={MAX_QUERY_LENGTH}
             disabled={!authReady}
+            // eslint-disable-next-line security/detect-object-injection -- exampleIdx is a rotating numeric index held in local component state, never external input
             placeholder={authReady ? `Ask anything (e.g., '${EXAMPLE_QUERIES[exampleIdx]}')...` : "Authenticating..."}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl py-3 pl-12 pr-32 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors shadow-inner disabled:opacity-60"
           />

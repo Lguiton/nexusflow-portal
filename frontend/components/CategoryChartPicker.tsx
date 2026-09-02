@@ -64,6 +64,7 @@ const formatCurrencyTick = (v: number) =>
 // so the rounded end is always the bar's tip, never its base.
 const directionalBarShape = (key: string) => (props: any) => {
   const { x, y, width, height, payload, fill } = props;
+  // eslint-disable-next-line security/detect-object-injection -- key is a dataKeys entry from the typed config prop the parent sets internally, never external input
   const value = payload?.[key] ?? 0;
   const radius: [number, number, number, number] = value < 0 ? [0, 0, 4, 4] : [4, 4, 0, 0];
   return <Rectangle x={x} y={y} width={width} height={height} radius={radius} fill={fill} />;
@@ -108,10 +109,13 @@ export default function CategoryChartPicker({ data, config, stackedSection, boxS
   const valueKey = config.dataKeys[0];
 
   const paretoData = useMemo(() => {
+    // eslint-disable-next-line security/detect-object-injection -- valueKey is config.dataKeys[0], from the typed config prop the parent sets internally, never external input
     const sorted = [...data].sort((a, b) => Math.abs(b[valueKey] ?? 0) - Math.abs(a[valueKey] ?? 0));
+    // eslint-disable-next-line security/detect-object-injection -- valueKey is config.dataKeys[0], from the typed config prop the parent sets internally, never external input
     const total = sorted.reduce((sum, row) => sum + Math.abs(row[valueKey] ?? 0), 0);
     let running = 0;
     return sorted.map((row) => {
+      // eslint-disable-next-line security/detect-object-injection -- valueKey is config.dataKeys[0], from the typed config prop the parent sets internally, never external input
       running += Math.abs(row[valueKey] ?? 0);
       return { ...row, cumulative_pct: total > 0 ? Math.round((running / total) * 1000) / 10 : 0 };
     });
@@ -128,6 +132,7 @@ export default function CategoryChartPicker({ data, config, stackedSection, boxS
   // REAL signed dollar amount (via _realAmount, not the magnitude used for
   // sizing), so a slice never gets relabeled as if it were revenue.
   const pieData = useMemo(
+    // eslint-disable-next-line security/detect-object-injection -- valueKey is config.dataKeys[0], from the typed config prop the parent sets internally, never external input
     () => data.map((row) => ({ ...row, _magnitude: Math.abs(row[valueKey] ?? 0), _realAmount: row[valueKey] ?? 0 })),
     [data, valueKey]
   );

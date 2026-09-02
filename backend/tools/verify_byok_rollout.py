@@ -156,7 +156,7 @@ def main() -> int:
                 # Some call sites (the two _summarize_with_llm helpers)
                 # return a plain list rather than raising -- either way,
                 # only the spy call matters here.
-                pass
+                pass  # nosec B110
             after_calls = calls[before:]
             passed = len(after_calls) >= 1 and all(c["client_id"] == tenant_id for c in after_calls)
             checks.append((label, passed, after_calls))

@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -35,12 +35,37 @@ AI_MAX_RETRIES = 2
 platform_api_key = os.getenv("OPENAI_API_KEY")
  
  
-def _summarize_with_llm(client_id: str, query: str, chart_type: str, recharts_config: dict, context: dict) -> List[str]:
+def _format_history_for_prompt(conversation_history: Optional[List[Dict[str, Any]]]) -> str:
+    """AI-08 mechanical follow-up: identical to bi_engineer.py's original
+    Track 4 implementation. See virtual_cfo.py's copy for the full rationale
+    on why this is duplicated per-agent rather than centralized."""
+    if not conversation_history:
+        return ""
+    lines = []
+    for turn in conversation_history:
+        role = turn.get("role", "user")
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return "\n    Recent conversation in this session (oldest first):\n    " + "\n    ".join(lines)
+
+
+def _summarize_with_llm(
+    client_id: str, query: str, chart_type: str, recharts_config: dict, context: dict,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     """
     Optional commentary layer only. The chart type and recharts_config
     passed in are already real, data-grounded decisions by the time this
     runs -- the model is asked to comment on why they fit, never to invent
     a different chart type or different columns.
+
+    AI-08 (27 Aug 2026): `conversation_history` (optional, default None) --
+    see virtual_cfo.generate_cfo_briefing's docstring for the full rationale.
+    Additive only; callers that omit it keep today's exact behavior.
     """
     client = get_openai_client_for_tenant_sync(client_id, platform_api_key, AI_REQUEST_TIMEOUT_SECONDS, AI_MAX_RETRIES)
     if not client:
@@ -56,6 +81,7 @@ def _summarize_with_llm(client_id: str, query: str, chart_type: str, recharts_co
     Provide up to 3 short, practical observations about why this chart
     suits this real data, or a caveat worth knowing -- do not propose a
     different chart type or invent different column names.
+    {_format_history_for_prompt(conversation_history)}
     Respond STRICTLY in JSON: {{"insights": ["..."]}}
     """
     try:
@@ -303,13 +329,20 @@ async def generate_chart_suite(client_id: str = "default_client") -> Dict[str, A
     }
 
 
-def execute_task(client_id: str = "default_client", query: str = "") -> Dict[str, Any]:
+def execute_task(
+    client_id: str = "default_client", query: str = "",
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
     Real chart-type recommendation grounded in this tenant's actual ledger
     data (via db_manager.get_ledger_chart_context) -- not an invented
     schema. Returns NO_DATA (matching the status convention used elsewhere
     in this codebase) rather than fabricating a chart for a tenant with no
     ingested data yet.
+
+    AI-08 (27 Aug 2026): `conversation_history` (optional, default None) --
+    see virtual_cfo.generate_cfo_briefing's docstring for the full rationale.
+    Additive only; callers that omit it keep today's exact behavior.
     """
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
  
@@ -352,7 +385,7 @@ def execute_task(client_id: str = "default_client", query: str = "") -> Dict[str
         }
  
     chart_type, recharts_config, rationale_basis = _choose_chart(query, context)
-    insights = _summarize_with_llm(safe_client_id, query, chart_type, recharts_config, context)
+    insights = _summarize_with_llm(safe_client_id, query, chart_type, recharts_config, context, conversation_history)
  
     return {
         "agent": "BI Visualization Architect",

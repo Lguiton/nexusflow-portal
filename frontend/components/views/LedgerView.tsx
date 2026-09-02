@@ -22,6 +22,7 @@ function toCsv(rows: any[]): string {
     const s = v === null || v === undefined ? "" : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
+  // eslint-disable-next-line security/detect-object-injection -- h comes from the fixed local `header` array of known CSV column names, never external input
   const lines = rows.map((r) => header.map((h) => escape(r[h])).join(","));
   return [header.join(","), ...lines].join("\n");
 }

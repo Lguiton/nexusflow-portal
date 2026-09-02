@@ -1,5 +1,6 @@
 node_modules/
 .next/
+venv/
 backend/venv/
 backend/.venv/
 __pycache__/
@@ -19,3 +20,15 @@ frontend/.env.local
 # explicit decision before this repo is ever pushed.
 *.duckdb
 backend/eivanta_core.db
+
+# 2 Sep 2026: *.duckdb doesn't match DuckDB's own write-ahead-log file
+# (<name>.duckdb.wal) -- found backend/eivanta.duckdb.wal sitting untracked
+# and about to be swept into a commit for this (public) repo before this
+# was added. Same live-data reasoning as the block above.
+*.duckdb.wal
+
+# Session scratch/cleanup staging directories -- never intended for the
+# repo; the files inside were moved here pending manual deletion by the
+# founder, not to be committed.
+_to_delete/
+frontend/_to_delete/

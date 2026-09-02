@@ -170,6 +170,7 @@ export default function TelemetryScoutCard() {
                 {Object.entries(result.duckdb_schema_mapping ?? {}).map(([col, type]) => (
                   <div key={col} className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs">
                     <span className="text-slate-300 font-mono truncate mr-2">{col}</span>
+                    {/* eslint-disable-next-line security/detect-object-injection -- type comes from Object.entries(result.duckdb_schema_mapping) and is used only to look up a CSS class in a fixed local table, with a safe fallback */}
                     <span className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-semibold shrink-0 ${TYPE_COLORS[type] ?? "text-slate-400 bg-slate-500/10"}`}>
                       {type}
                     </span>

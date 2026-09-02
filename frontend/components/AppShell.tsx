@@ -98,6 +98,7 @@ export default function AppShell({ activeView, onChangeView, onOpenCommandPalett
   // reachable via the sidebar for viewers (read-only content there).
   const canUpload = user?.role !== "viewer";
 
+  // eslint-disable-next-line security/detect-object-injection -- activeView is always one of the fixed VIEW_ORDER route ids (a typed union), never external input
   const meta = VIEW_META[activeView];
   const accentAttr = activeView === "overview" ? undefined : activeView;
 
@@ -135,6 +136,7 @@ export default function AppShell({ activeView, onChangeView, onOpenCommandPalett
         <nav className="nf-nav-group">
           <div className="nf-nav-eyebrow">Workspace</div>
           {VIEW_ORDER.map((id) => {
+            // eslint-disable-next-line security/detect-object-injection -- id comes from VIEW_ORDER.map, a fixed local array of route ids, never external input
             const item = VIEW_META[id];
             const Icon = item.icon;
             return (

@@ -21,6 +21,7 @@ const SUBMISSION_COOLDOWN_MS = 1000;
 const getEnv = (key: string, fallback: string) => {
   try {
     const env = (globalThis as typeof globalThis & { process?: { env?: Record<string, string | undefined> } }).process?.env;
+    // eslint-disable-next-line security/detect-object-injection -- key is this helper's own string parameter, always one of the small fixed set of literals its call sites pass
     return env?.[key] || fallback;
   } catch {
     return fallback;
@@ -116,6 +117,7 @@ export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessi
               const existingIndex = prev.findIndex((l: LogStep) => l.stepId === data.stepId);
               if (existingIndex !== -1) {
                 const updated = [...prev];
+                // eslint-disable-next-line security/detect-object-injection -- existingIndex is a numeric array index from prev.findIndex, guarded by !== -1, never external input
                 updated[existingIndex] = data;
                 return updated;
               }
@@ -131,6 +133,7 @@ export default function SwarmLogStreamer({ sessionId = "demo_session" }: { sessi
               const [targetIndex, ...rest] = queue;
               pendingByAgent.current.set(data.agent, rest);
               const updated = [...prev];
+              // eslint-disable-next-line security/detect-object-injection -- targetIndex is a numeric index tracked internally in pendingByAgent's own queue bookkeeping, never external input
               updated[targetIndex] = data;
               return updated;
             }

@@ -396,7 +396,7 @@ async def _lifecycle_fields(client_id: str) -> dict:
     return {"lifecycle_status": status, "tenant_suspended": status == "suspended"}
 
 
-@router.post("/api/v1/auth/signup")
+@router.post("/api/v1/auth/signup", tags=["Auth"])
 async def signup(req: SignupRequest, request: Request):
     """
     Creates a brand-new tenant and its first user (always role='owner').
@@ -423,12 +423,12 @@ async def signup(req: SignupRequest, request: Request):
     device_label = _derive_device_label(request.headers.get("user-agent"))
     refresh_token = await _mint_refresh_token(user, device_label=device_label)
     return {
-        "access_token": token, "refresh_token": refresh_token, "token_type": "bearer",
+        "access_token": token, "refresh_token": refresh_token, "token_type": "bearer",  # nosec B105 -- OAuth2 token-type label, not a credential
         **user, **await _lifecycle_fields(user["client_id"]),
     }
 
 
-@router.post("/api/v1/auth/login")
+@router.post("/api/v1/auth/login", tags=["Auth"])
 async def login(req: LoginRequest, request: Request):
     email_norm = req.email.strip().lower()
     user = await db_manager.get_user_by_email(email_norm)
@@ -496,7 +496,7 @@ async def login(req: LoginRequest, request: Request):
     return {
         "access_token": token,
         "refresh_token": refresh_token,
-        "token_type": "bearer",
+        "token_type": "bearer",  # nosec B105 -- OAuth2 token-type label, not a credential
         "user_id": user["user_id"],
         "client_id": user["client_id"],
         "email": user["email"],
@@ -505,7 +505,7 @@ async def login(req: LoginRequest, request: Request):
     }
 
 
-@router.post("/api/v1/auth/mfa/verify")
+@router.post("/api/v1/auth/mfa/verify", tags=["Auth"])
 async def mfa_verify(
     req: MfaVerifyRequest,
     request: Request,
@@ -551,7 +551,7 @@ async def mfa_verify(
     return {
         "access_token": token,
         "refresh_token": refresh_token,
-        "token_type": "bearer",
+        "token_type": "bearer",  # nosec B105 -- OAuth2 token-type label, not a credential
         "user_id": user["user_id"],
         "client_id": user["client_id"],
         "email": user["email"],
@@ -560,7 +560,7 @@ async def mfa_verify(
     }
 
 
-@router.post("/api/v1/auth/refresh")
+@router.post("/api/v1/auth/refresh", tags=["Auth"])
 async def refresh(req: RefreshRequest):
     """
     AUTH-02: exchanges a valid, not-yet-used refresh token for a brand new
@@ -626,7 +626,7 @@ async def refresh(req: RefreshRequest):
     return {
         "access_token": new_access_token,
         "refresh_token": new_refresh_token,
-        "token_type": "bearer",
+        "token_type": "bearer",  # nosec B105 -- OAuth2 token-type label, not a credential
         "user_id": user["user_id"],
         "client_id": user["client_id"],
         "email": user["email"],
@@ -635,7 +635,7 @@ async def refresh(req: RefreshRequest):
     }
 
 
-@router.post("/api/v1/auth/logout")
+@router.post("/api/v1/auth/logout", tags=["Auth"])
 async def logout(req: LogoutRequest):
     """
     Revokes ONE refresh token -- the one this device/session was using --
@@ -659,7 +659,7 @@ async def logout(req: LogoutRequest):
     return {"ok": True}
 
 
-@router.get("/api/v1/auth/sessions")
+@router.get("/api/v1/auth/sessions", tags=["Auth"])
 async def list_sessions(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
     """
     AUTH-06: every currently-active (non-revoked, non-expired) refresh-
@@ -678,7 +678,7 @@ async def list_sessions(user: AuthenticatedUser = Depends(verify_jwt_and_get_use
     return {"sessions": sessions}
 
 
-@router.delete("/api/v1/auth/sessions/{session_id}")
+@router.delete("/api/v1/auth/sessions/{session_id}", tags=["Auth"])
 async def revoke_session(session_id: int, user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
     """
     AUTH-06: signs out ONE specific device/session by id, without touching
@@ -695,7 +695,7 @@ async def revoke_session(session_id: int, user: AuthenticatedUser = Depends(veri
     return {"session_id": session_id, "revoked": True}
 
 
-@router.post("/api/v1/auth/sessions/revoke-all")
+@router.post("/api/v1/auth/sessions/revoke-all", tags=["Auth"])
 async def revoke_all_sessions(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
     """
     AUTH-06: the blunt "I think my account is compromised" tool -- revokes
@@ -717,7 +717,7 @@ async def revoke_all_sessions(user: AuthenticatedUser = Depends(verify_jwt_and_g
     return {"ok": True}
 
 
-@router.post("/api/v1/auth/mfa/setup")
+@router.post("/api/v1/auth/mfa/setup", tags=["Auth"])
 async def mfa_setup(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
     """
     AUTH-04 step 1: generates a fresh TOTP secret and stores it as PENDING
@@ -746,7 +746,7 @@ async def mfa_setup(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
     return {"secret": secret, "otpauth_uri": otpauth_uri, "qr_code_data_uri": qr_data_uri}
 
 
-@router.post("/api/v1/auth/mfa/enable")
+@router.post("/api/v1/auth/mfa/enable", tags=["Auth"])
 async def mfa_enable(
     req: MfaEnableRequest,
     user: AuthenticatedUser = Depends(verify_jwt_and_get_user),
@@ -780,7 +780,7 @@ async def mfa_enable(
     return {"enabled": True, "backup_codes": backup_codes}
 
 
-@router.post("/api/v1/auth/mfa/disable")
+@router.post("/api/v1/auth/mfa/disable", tags=["Auth"])
 async def mfa_disable(
     req: MfaDisableRequest,
     user: AuthenticatedUser = Depends(verify_jwt_and_get_user),
@@ -805,13 +805,13 @@ async def mfa_disable(
     return {"enabled": False}
 
 
-@router.get("/api/v1/auth/mfa/status")
+@router.get("/api/v1/auth/mfa/status", tags=["Auth"])
 async def mfa_status(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
     """Any authenticated person can check their OWN MFA status -- this never takes a user_id parameter, only ever the caller's own."""
     return await db_manager.get_mfa_status(user.user_id)
 
 
-@router.get("/api/v1/auth/me")
+@router.get("/api/v1/auth/me", tags=["Auth"])
 async def get_me(user: AuthenticatedUser = Depends(verify_jwt_and_get_user_allow_suspended)):
     """
     TEN-01/TEN-02: deliberately uses the _allow_suspended dependency, NOT
@@ -830,7 +830,7 @@ async def get_me(user: AuthenticatedUser = Depends(verify_jwt_and_get_user_allow
     }
 
 
-@router.get("/api/v1/tenant/status")
+@router.get("/api/v1/tenant/status", tags=["Tenant & Team"])
 async def tenant_status(user: AuthenticatedUser = Depends(verify_jwt_and_get_user_allow_suspended)):
     """Any authenticated role can see the tenant's own lifecycle state -- not sensitive on its own, and every role needs it to render the right UI."""
     detail = await db_manager.get_tenant_lifecycle_detail(user.client_id)
@@ -839,7 +839,7 @@ async def tenant_status(user: AuthenticatedUser = Depends(verify_jwt_and_get_use
     return detail
 
 
-@router.post("/api/v1/tenant/suspend")
+@router.post("/api/v1/tenant/suspend", tags=["Tenant & Team"])
 async def suspend_tenant(user: AuthenticatedUser = Depends(require_role_allow_suspended("owner"))):
     """
     TEN-01/TEN-02: manual, owner-only, self-service suspension -- NOT
@@ -855,7 +855,7 @@ async def suspend_tenant(user: AuthenticatedUser = Depends(require_role_allow_su
     return detail
 
 
-@router.post("/api/v1/tenant/reactivate")
+@router.post("/api/v1/tenant/reactivate", tags=["Tenant & Team"])
 async def reactivate_tenant(user: AuthenticatedUser = Depends(require_role_allow_suspended("owner"))):
     """
     TEN-01/TEN-02: the ONE endpoint that MUST work while the tenant is
@@ -869,7 +869,7 @@ async def reactivate_tenant(user: AuthenticatedUser = Depends(require_role_allow
     return detail
 
 
-@router.get("/api/v1/tenant/export")
+@router.get("/api/v1/tenant/export", tags=["Tenant & Team"])
 async def export_tenant(user: AuthenticatedUser = Depends(require_role_allow_suspended("owner", "admin"))):
     """
     TEN-03: real data-portability export -- every row this tenant owns,
@@ -885,7 +885,7 @@ async def export_tenant(user: AuthenticatedUser = Depends(require_role_allow_sus
     return data
 
 
-@router.delete("/api/v1/tenant")
+@router.delete("/api/v1/tenant", tags=["Tenant & Team"])
 async def delete_tenant(
     req: TenantDeleteRequest,
     user: AuthenticatedUser = Depends(require_role_allow_suspended("owner")),
@@ -916,13 +916,13 @@ async def delete_tenant(
     return result
 
 
-@router.get("/api/v1/team/users")
+@router.get("/api/v1/team/users", tags=["Tenant & Team"])
 async def list_team(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
     """Any authenticated teammate (any role) can see the team roster -- not a sensitive operation on its own."""
     return {"users": await db_manager.list_users_for_tenant(user.client_id)}
 
 
-@router.post("/api/v1/team/invite")
+@router.post("/api/v1/team/invite", tags=["Tenant & Team"])
 async def invite_teammate(
     req: InviteRequest,
     user: AuthenticatedUser = Depends(require_role("owner", "admin")),
@@ -949,7 +949,7 @@ async def invite_teammate(
     return {**invited, "temp_password": temp_password}
 
 
-@router.patch("/api/v1/team/users/{target_user_id}/role")
+@router.patch("/api/v1/team/users/{target_user_id}/role", tags=["Tenant & Team"])
 async def update_teammate_role(
     target_user_id: int,
     req: UpdateRoleRequest,
@@ -963,7 +963,7 @@ async def update_teammate_role(
     return {"user_id": target_user_id, "role": req.role, "updated": True}
 
 
-@router.delete("/api/v1/team/users/{target_user_id}")
+@router.delete("/api/v1/team/users/{target_user_id}", tags=["Tenant & Team"])
 async def remove_teammate(
     target_user_id: int,
     user: AuthenticatedUser = Depends(require_role("owner")),

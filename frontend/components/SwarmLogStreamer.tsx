@@ -12,8 +12,37 @@ interface LogEntry {
   stepId?: string;
 }
 
-const RECONNECT_DELAY_MS = 3000;
 const MAX_LOGS = 50;
+
+// WS-01: reconnect backoff. Previously a fixed 3000ms retry -- against a
+// genuinely down backend (not just one bad connection) that hammers the
+// server every 3 seconds forever, from every open tab. Exponential with a
+// cap and +/-20% jitter (so many tabs reconnecting after the same outage
+// don't all retry in lockstep) -- resets to the base delay on every
+// successful `onopen`, so one bad attempt doesn't permanently slow down a
+// connection that recovers immediately after.
+const RECONNECT_BASE_DELAY_MS = 3000;
+const RECONNECT_MAX_DELAY_MS = 30000;
+
+function nextReconnectDelay(attempt: number): number {
+  const raw = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS);
+  const jitter = raw * 0.2 * (Math.random() * 2 - 1); // +/-20%
+  return Math.max(RECONNECT_BASE_DELAY_MS, Math.round(raw + jitter));
+}
+
+// WS-01: dead-connection timeout. The backend sends a real message (a
+// HEARTBEAT, at minimum) every 5 seconds once connected -- see
+// backend/routers/swarm.py. A TCP connection can go silently dead (a
+// dropped wifi link, a sleeping laptop, a NAT timeout) without the browser
+// ever firing `onclose`; WATCHDOG_TIMEOUT_MS is comfortably more than one
+// missed heartbeat (3x the interval) before this client gives up waiting
+// and forces a reconnect itself, rather than sitting "Connected" and stale
+// indefinitely. Checked on its own interval rather than one timer per
+// message, so a burst of real agent-step messages doesn't need to
+// reset/reschedule anything.
+const HEARTBEAT_INTERVAL_MS = 5000;
+const WATCHDOG_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
+const WATCHDOG_CHECK_INTERVAL_MS = 2000;
 
 export default function SwarmLogStreamer({ sessionId = "active_dashboard_session" }: { sessionId?: string }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -78,9 +107,26 @@ export default function SwarmLogStreamer({ sessionId = "active_dashboard_session
     let cancelled = false;
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+    let reconnectAttempt = 0;
+    // WS-01: message identity/ordering. Reset to null on every fresh
+    // connect() -- the server also resets its own per-connection seq to 0
+    // on connect (see backend/websocket_manager.py), and the CONNECTED
+    // message is always seq=0, so `null` here just means "haven't
+    // anchored against a CONNECTED message yet."
+    let expectedSeq: number | null = null;
+    let lastMessageAt = Date.now();
+
+    function clearWatchdog() {
+      if (watchdogTimer) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+      }
+    }
 
     function connect() {
       if (cancelled) return;
+      expectedSeq = null;
       const backendWsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
       ws = new WebSocket(
         `${backendWsUrl}/ws/swarm/${currentClientId}/${sessionId}?token=${encodeURIComponent(authToken as string)}`
@@ -88,11 +134,42 @@ export default function SwarmLogStreamer({ sessionId = "active_dashboard_session
 
       ws.onopen = () => {
         setIsConnected(true);
+        reconnectAttempt = 0; // WS-01: a successful connect resets backoff to the base delay.
+        lastMessageAt = Date.now();
+
+        // WS-01: dead-connection watchdog. A dropped connection doesn't
+        // always fire `onclose` promptly (or at all, on some networks) --
+        // this notices the silence independently and forces a reconnect.
+        clearWatchdog();
+        watchdogTimer = setInterval(() => {
+          if (Date.now() - lastMessageAt > WATCHDOG_TIMEOUT_MS) {
+            clearWatchdog();
+            ws?.close(); // triggers the same onclose -> reconnect path as any other drop
+          }
+        }, WATCHDOG_CHECK_INTERVAL_MS);
       };
 
       ws.onmessage = (event) => {
+        lastMessageAt = Date.now();
         try {
           const data = JSON.parse(event.data);
+
+          // WS-01: message identity/ordering -- non-fatal. A gap here means
+          // a message was lost in transit (rare within one open TCP
+          // connection, more plausible across the brief window a drop and
+          // reconnect race in); it's surfaced as a diagnostic, not treated
+          // as a reason to drop the message or the connection, since the
+          // heartbeat/watchdog above already covers the "connection is
+          // actually dead" case on its own.
+          if (typeof data.seq === "number") {
+            if (expectedSeq !== null && data.seq !== expectedSeq) {
+              console.warn(
+                `SwarmLogStreamer: telemetry seq gap (expected ${expectedSeq}, got ${data.seq}) -- a message may have been lost.`
+              );
+            }
+            expectedSeq = data.seq + 1;
+          }
+
           const newLog: LogEntry = {
             timestamp: new Date().toLocaleTimeString(),
             agent: data.agent || "System",
@@ -110,6 +187,7 @@ export default function SwarmLogStreamer({ sessionId = "active_dashboard_session
               const existingIndex = prev.findIndex((l) => l.stepId === newLog.stepId);
               if (existingIndex !== -1) {
                 const updated = [...prev];
+                // eslint-disable-next-line security/detect-object-injection -- existingIndex is a numeric array index from prev.findIndex, guarded by !== -1, never external input
                 updated[existingIndex] = newLog;
                 return updated;
               }
@@ -123,6 +201,7 @@ export default function SwarmLogStreamer({ sessionId = "active_dashboard_session
 
       ws.onclose = (event) => {
         setIsConnected(false);
+        clearWatchdog();
         if (cancelled) return;
         // 4008 = WS_4008_POLICY_VIOLATION (backend rejected the token, or
         // a token/path client_id mismatch). Retrying immediately with the
@@ -134,7 +213,9 @@ export default function SwarmLogStreamer({ sessionId = "active_dashboard_session
           setAuthFailed(true);
           return;
         }
-        reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
+        const delay = nextReconnectDelay(reconnectAttempt);
+        reconnectAttempt += 1;
+        reconnectTimer = setTimeout(connect, delay);
       };
     }
 
@@ -143,6 +224,7 @@ export default function SwarmLogStreamer({ sessionId = "active_dashboard_session
     return () => {
       cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearWatchdog();
       if (ws) ws.close();
     };
   }, [sessionId, currentClientId, authToken, authReady]);

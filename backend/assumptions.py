@@ -188,7 +188,7 @@ def _build_assumptions() -> dict:
     }
 
 
-@router.get("/api/v1/assumptions")
+@router.get("/api/v1/assumptions", tags=["Insights & Assumptions"])
 async def get_assumptions(client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         return _build_assumptions()

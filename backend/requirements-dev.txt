@@ -1,0 +1,8 @@
+# Dev/CI tooling only -- never installed in the production image (see
+# backend/Dockerfile, which installs only requirements.txt). Kept as a
+# separate file from requirements.txt on purpose: pip-audit (and anything
+# added here later, e.g. pytest, bandit) has no business shipping to
+# production, and mixing runtime and dev dependencies in one file makes it
+# easy to accidentally ship a dev tool.
+
+pip-audit>=2.10.1

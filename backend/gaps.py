@@ -61,7 +61,7 @@ _STRUCTURAL_GAPS = [
 ]
 
 
-@router.post("/api/v1/insights/known-gaps")
+@router.post("/api/v1/insights/known-gaps", tags=["Insights & Assumptions"])
 async def get_known_gaps(client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         gaps = list(_STRUCTURAL_GAPS)

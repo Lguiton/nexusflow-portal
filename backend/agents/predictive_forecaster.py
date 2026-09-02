@@ -4,7 +4,7 @@ import logging
 import duckdb
 import numpy as np
 from scipy import stats
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from dotenv import load_dotenv
 
 try:
@@ -280,7 +280,28 @@ def _error_state_response(reason: str) -> Dict[str, Any]:
     }
 
 
-def generate_forecast(client_id: str = "default_client") -> Dict[str, Any]:
+def _format_history_for_prompt(conversation_history: Optional[List[Dict[str, Any]]]) -> str:
+    """AI-08 mechanical follow-up: identical to bi_engineer.py's original
+    Track 4 implementation. See virtual_cfo.py's copy for the full rationale
+    on why this is duplicated per-agent rather than centralized."""
+    if not conversation_history:
+        return ""
+    lines = []
+    for turn in conversation_history:
+        role = turn.get("role", "user")
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return "\n    Recent conversation in this session (oldest first):\n    " + "\n    ".join(lines)
+
+
+def generate_forecast(
+    client_id: str = "default_client",
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
     Agent #07 (Predictive Forecaster).
 
@@ -292,6 +313,10 @@ def generate_forecast(client_id: str = "default_client") -> Dict[str, Any]:
     1.15 and asked an LLM to narrate a fabricated "confidence interval" --
     see chat history for the full explanation of why that violated SRS
     FR-3.1/FR-3.3.
+
+    AI-08 (27 Aug 2026): `conversation_history` (optional, default None) --
+    see virtual_cfo.generate_cfo_briefing's docstring for the full rationale.
+    Additive only; callers that omit it keep today's exact behavior.
     """
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
     periods, revenue, total_rows, skipped_dates, db_failed, failure_reason = _load_monthly_revenue(safe_client_id)
@@ -348,6 +373,7 @@ def generate_forecast(client_id: str = "default_client") -> Dict[str, Any]:
     Real revenue-risk signal (tenant-level, NOT customer churn) -> risk_level: {revenue_risk['risk_level']}, {revenue_risk['consecutive_declining_months']} consecutive declining month(s), recent trend {revenue_risk['recent_growth_rate_pct_per_month']}%/month vs overall {revenue_risk['overall_growth_rate_pct_per_month']}%/month, deceleration_detected: {revenue_risk['deceleration_detected']}.
 
     These numbers come from a real linear regression and real trend comparison over actual monthly revenue -- do not invent any additional statistics, and do not describe the risk signal as customer churn. Summarize what these real numbers mean for the business.
+    {_format_history_for_prompt(conversation_history)}
 
     Respond in pure JSON:
     {{

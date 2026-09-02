@@ -127,6 +127,7 @@ export default function AgentDirectory() {
   const trackedKeys = Object.keys(statusMap).length > 0
     ? TRACKED_ORDER.filter((k) => k in statusMap)
     : [];
+  // eslint-disable-next-line security/detect-object-injection -- k comes from Object.keys(statusMap) filtered against the fixed TRACKED_ORDER allowlist -- never external input
   const verifiedCount = trackedKeys.filter((k) => statusMap[k]).length;
 
   return (
@@ -154,8 +155,11 @@ export default function AgentDirectory() {
         ) : (
           <div className="flex flex-col gap-1.5">
             {trackedKeys.map((key) => {
+              // eslint-disable-next-line security/detect-object-injection -- key comes from trackedKeys, itself Object.keys(statusMap) filtered against the fixed TRACKED_ORDER allowlist -- never external input
               const isUp = statusMap[key] === true;
+              // eslint-disable-next-line security/detect-object-injection -- key comes from trackedKeys, itself Object.keys(statusMap) filtered against the fixed TRACKED_ORDER allowlist -- never external input
               const meta = TRACKED_META[key] ?? { label: key, description: "No description on file." };
+              // eslint-disable-next-line security/detect-object-injection -- key comes from trackedKeys, itself Object.keys(statusMap) filtered against the fixed TRACKED_ORDER allowlist -- never external input
               const failureReason = failures[key];
               const open = openRow === key;
               return (

@@ -5,16 +5,17 @@ import contextlib
 import glob
 import statistics
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
-from backend.db_manager import ingest_csv_to_db
-from backend.auth import verify_jwt_and_get_client_id, require_role, AuthenticatedUser
+from backend.db_manager import ingest_csv_to_db, init_telemetry_schema
+from backend.auth import verify_jwt_and_get_client_id, verify_jwt_and_get_user, require_role, AuthenticatedUser
 from backend.rate_limit import check_ingestion_rate_limit
 def get_active_agent_count() -> int:
     try:
@@ -49,8 +50,27 @@ except ImportError as e:
     logger.error(f"MCP tool server unavailable (INT-01) -- is 'mcp' installed? {e}")
 
 
+# OPS-09 (27 Aug 2026): metrics.py used to register its own telemetry-schema
+# init via the deprecated `@router.on_event("startup")` FastAPI hook -- that
+# decorator is deprecated (still functional as of fastapi 0.141.1, but on a
+# removal path) in favor of the app-level `lifespan` context manager below,
+# which this app already had for INT-01's MCP session-manager startup/
+# shutdown. Tracked here (not inside metrics.py) because only main.py knows
+# whether the metrics router actually loaded -- see _metrics_router_loaded
+# just below, set once the import a few lines down either succeeds or fails.
+_metrics_router_loaded = False
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    if _metrics_router_loaded:
+        # Same "must run after the real event loop exists" requirement the
+        # old on_event handler had -- this lifespan only starts running once
+        # uvicorn's loop is live, same as on_event startup did. Gated on
+        # _metrics_router_loaded so behavior matches the old on_event
+        # handler exactly: a handler registered on a router that never got
+        # included would never have fired either.
+        await init_telemetry_schema()
     if _mcp_lifespan is not None:
         async with _mcp_lifespan():
             yield
@@ -72,6 +92,7 @@ except ImportError as e:
 try:
     from backend import metrics
     app.include_router(metrics.router)
+    _metrics_router_loaded = True
 except ImportError as e:
     logger.error(f"Failed to load metrics router: {e}")
 try:
@@ -144,7 +165,7 @@ class BISummaryRequest(BaseModel):
     # cost versus before this field existed.
     query: str = Field("", max_length=2000)
 MAX_UPLOAD_BYTES = int(os.environ.get("EIVANTA_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
-@app.get("/api/v1/health")
+@app.get("/api/v1/health", tags=["Health"])
 async def get_health():
     active_agents = get_active_agent_count()
     return {
@@ -188,6 +209,30 @@ async def enforce_budget_gate(client_id: str = Depends(verify_jwt_and_get_client
             ),
         )
     return client_id
+
+
+# SQL-03 (27 Aug 2026): identical budget-gate check as enforce_budget_gate
+# above, but returns the full AuthenticatedUser instead of a bare client_id
+# string, so callers that need user-level attribution (currently: the two
+# endpoints that ultimately write a query_audit row) can get it without
+# changing enforce_budget_gate's existing plain-string contract, which
+# 7+ other endpoints already depend on unchanged.
+async def enforce_budget_gate_for_user(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)) -> AuthenticatedUser:
+    try:
+        from backend.db_manager import check_budget_gate
+        gate = await check_budget_gate(user.client_id)
+    except Exception as e:
+        logger.error(f"Budget gate check failed for tenant '{user.client_id}', allowing request: {e}")
+        return user
+    if not gate.get("allowed", True):
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"Monthly AI usage cap reached (${gate['usage_usd']:.2f} of ${gate['cap_usd']:.2f}). "
+                "Raise or remove your cap in Settings to continue."
+            ),
+        )
+    return user
 # RBAC-01: /api/v1/auth/dev-login is retired, not just deprecated -- its
 # own comment said it "must be replaced, not just left in place" during
 # the auth-hardening pass, and this is that pass. Real signup/login/team
@@ -195,7 +240,7 @@ async def enforce_budget_gate(client_id: str = Depends(verify_jwt_and_get_client
 # block above main.py's other routers). Anything still calling
 # dev-login (a stale frontend build, an old test fixture) gets a real
 # 404, not a silent security hole.
-@app.post("/api/finance/upload-ledger")
+@app.post("/api/finance/upload-ledger", tags=["Ledger & Ingestion"])
 async def upload_ledger(
     file: UploadFile = File(...),
     # RBAC-01: mutates real tenant data (ingests rows) -- viewer excluded.
@@ -209,9 +254,23 @@ async def upload_ledger(
     # DB-backed, and what upgrading it would take.
     check_ingestion_rate_limit(client_id)
     safe_filename = Path(file.filename or "upload.csv").name
-    temp_dir = Path("/tmp/eivanta_ingest")
+    # SEC-03 SAST (28 Aug 2026, bandit B108): a predictable, shared /tmp
+    # path with default (umask-derived, typically world-readable) directory
+    # permissions is a real hardening gap, even though this single-process
+    # container has no other untrusted local process to exploit it today --
+    # explicitly locking the directory to owner-only closes it regardless of
+    # deployment topology. os.chmod is called unconditionally (not just
+    # on first creation) because mkdir(mode=...) only applies its mode when
+    # it actually creates the directory -- exist_ok=True silently skips it
+    # on every later call, which would leave a looser-permissioned directory
+    # from an old process/deploy unfixed. A uuid component was also added
+    # to the filename (matching the knowledge-upload endpoint below, which
+    # already had one) -- without it, two concurrent uploads of the same
+    # filename from the same tenant collide on this exact path.
+    temp_dir = Path("/tmp/eivanta_ingest")  # nosec B108 -- locked to 0700 immediately below, unconditionally, every request
     temp_dir.mkdir(parents=True, exist_ok=True)
-    file_path = temp_dir / f"{client_id}_{safe_filename}"
+    os.chmod(temp_dir, 0o700)
+    file_path = temp_dir / f"{client_id}_{uuid.uuid4().hex}_{safe_filename}"
     bytes_written = 0
     try:
         with open(file_path, "wb") as buffer:
@@ -240,7 +299,7 @@ async def upload_ledger(
             file_path.unlink()
 
 
-@app.get("/api/v1/data/ingestion-history")
+@app.get("/api/v1/data/ingestion-history", tags=["Ledger & Ingestion"])
 async def get_ingestion_history_endpoint(
     limit: int = 20,
     client_id: str = Depends(verify_jwt_and_get_client_id),
@@ -256,7 +315,7 @@ async def get_ingestion_history_endpoint(
         raise HTTPException(status_code=502, detail="Could not fetch ingestion history. Please try again.")
 
 
-@app.delete("/api/v1/finance/ledger")
+@app.delete("/api/v1/finance/ledger", tags=["Ledger & Ingestion"])
 async def delete_ledger_endpoint(
     # RBAC-01: destructive, irreversible, wipes ALL of this tenant's
     # ledger data at once -- restricted to owner/admin, not member/viewer.
@@ -279,11 +338,12 @@ async def delete_ledger_endpoint(
     except Exception as e:
         logger.error(f"Ledger deletion error: {e}")
         raise HTTPException(status_code=502, detail="Ledger deletion failed. Please try again.")
-@app.post("/api/search")
+@app.post("/api/search", tags=["Search"])
 async def secure_cognitive_search(
     req: SearchRequest,
-    client_id: str = Depends(enforce_budget_gate),
+    user: AuthenticatedUser = Depends(enforce_budget_gate_for_user),
 ):
+    client_id = user.client_id
     try:
         from backend.agents.ops_shield import analyze_threat
         threat_result = await asyncio.to_thread(analyze_threat, client_id, req.query)
@@ -295,12 +355,14 @@ async def secure_cognitive_search(
         raise HTTPException(status_code=403, detail="Request blocked by security policy.")
     try:
         from backend.agents.orchestrator import route_query
-        result = await asyncio.to_thread(route_query, req.query, client_id, req.session_id, req.sample_payload)
+        result = await asyncio.to_thread(
+            route_query, req.query, client_id, req.session_id, req.sample_payload, user.user_id
+        )
         return result
     except Exception as e:
         logger.error(f"Cognitive search routing error: {e}")
         raise HTTPException(status_code=502, detail="Search routing failed. Please try again.")
-@app.post("/api/v1/finance/cfo-briefing")
+@app.post("/api/v1/finance/cfo-briefing", tags=["BI & Analytics"])
 async def get_cfo_briefing(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.virtual_cfo import generate_cfo_briefing
@@ -309,7 +371,7 @@ async def get_cfo_briefing(client_id: str = Depends(enforce_budget_gate)):
     except Exception as e:
         logger.error(f"CFO Briefing Error: {e}")
         raise HTTPException(status_code=502, detail="CFO briefing generation failed. Please try again.")
-@app.post("/api/v1/finance/kpi-summary")
+@app.post("/api/v1/finance/kpi-summary", tags=["BI & Analytics"])
 async def get_kpi_summary(client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         from backend.db_manager import get_ledger_chart_context, get_mrr_summary
@@ -370,7 +432,7 @@ async def get_kpi_summary(client_id: str = Depends(verify_jwt_and_get_client_id)
     except Exception as e:
         logger.error(f"KPI Summary Error: {e}")
         raise HTTPException(status_code=502, detail="KPI summary generation failed. Please try again.")
-@app.post("/api/v1/finance/comptroller-audit")
+@app.post("/api/v1/finance/comptroller-audit", tags=["BI & Analytics"])
 async def run_comptroller_audit(client_id: str = Depends(verify_jwt_and_get_client_id)):
     """
     Track 5 (Interactive audit trigger): real expense audit over this
@@ -430,7 +492,7 @@ class BYOKKeyRequest(BaseModel):
     openai_api_key: str = Field(..., min_length=1)
 
 
-@app.get("/api/v1/settings/byok")
+@app.get("/api/v1/settings/byok", tags=["Settings"])
 async def get_byok_status(client_id: str = Depends(verify_jwt_and_get_client_id)):
     """
     Never returns the key itself, encrypted or otherwise -- only whether
@@ -447,7 +509,7 @@ async def get_byok_status(client_id: str = Depends(verify_jwt_and_get_client_id)
         raise HTTPException(status_code=502, detail="Could not check BYOK status.")
 
 
-@app.post("/api/v1/settings/byok")
+@app.post("/api/v1/settings/byok", tags=["Settings"])
 async def set_byok_key(req: BYOKKeyRequest, user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
     try:
         from backend.byok import encrypt_secret
@@ -466,7 +528,7 @@ async def set_byok_key(req: BYOKKeyRequest, user: AuthenticatedUser = Depends(re
         raise HTTPException(status_code=502, detail="Could not save your API key. Please try again.")
 
 
-@app.delete("/api/v1/settings/byok")
+@app.delete("/api/v1/settings/byok", tags=["Settings"])
 async def delete_byok_key(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
     try:
         from backend.db_manager import set_tenant_byok_key
@@ -488,7 +550,7 @@ class BudgetCapRequest(BaseModel):
     monthly_cap_usd: float = Field(..., gt=0)
 
 
-@app.get("/api/v1/settings/budget")
+@app.get("/api/v1/settings/budget", tags=["Settings"])
 async def get_budget_status(client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         from backend.db_manager import check_budget_gate
@@ -498,7 +560,7 @@ async def get_budget_status(client_id: str = Depends(verify_jwt_and_get_client_i
         raise HTTPException(status_code=502, detail="Could not check budget status.")
 
 
-@app.post("/api/v1/settings/budget")
+@app.post("/api/v1/settings/budget", tags=["Settings"])
 async def set_budget_cap(req: BudgetCapRequest, user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
     try:
         from backend.db_manager import set_tenant_budget_cap, check_budget_gate
@@ -509,7 +571,7 @@ async def set_budget_cap(req: BudgetCapRequest, user: AuthenticatedUser = Depend
         raise HTTPException(status_code=502, detail="Could not save your budget cap. Please try again.")
 
 
-@app.delete("/api/v1/settings/budget")
+@app.delete("/api/v1/settings/budget", tags=["Settings"])
 async def delete_budget_cap(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
     try:
         from backend.db_manager import set_tenant_budget_cap, check_budget_gate
@@ -527,7 +589,7 @@ async def delete_budget_cap(user: AuthenticatedUser = Depends(require_role("owne
 # same access level as the ingestion-history endpoint above.
 # ---------------------------------------------------------------------------
 
-@app.get("/api/v1/audit/lineage")
+@app.get("/api/v1/audit/lineage", tags=["Audit & Compliance"])
 async def get_audit_lineage(limit: int = 100, client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         from backend.db_manager import get_lineage_log, verify_lineage_chain
@@ -537,7 +599,7 @@ async def get_audit_lineage(limit: int = 100, client_id: str = Depends(verify_jw
     except Exception as e:
         logger.error(f"Audit lineage fetch error: {e}")
         raise HTTPException(status_code=502, detail="Could not fetch the audit lineage log.")
-@app.post("/api/v1/data/schema-audit")
+@app.post("/api/v1/data/schema-audit", tags=["Ledger & Ingestion"])
 async def run_schema_audit(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.data_engineer import analyze_schema_quality
@@ -546,19 +608,21 @@ async def run_schema_audit(client_id: str = Depends(enforce_budget_gate)):
     except Exception as e:
         logger.error(f"Data Engineer Audit Error: {e}")
         raise HTTPException(status_code=502, detail="Schema audit failed. Please try again.")
-@app.post("/api/v1/bi/summary")
+@app.post("/api/v1/bi/summary", tags=["BI & Analytics"])
 async def get_bi_summary(
     req: BISummaryRequest = BISummaryRequest(),
-    client_id: str = Depends(enforce_budget_gate),
+    user: AuthenticatedUser = Depends(enforce_budget_gate_for_user),
 ):
     try:
         from backend.agents.bi_engineer import generate_bi_summary
-        result = await asyncio.to_thread(generate_bi_summary, client_id, req.query)
+        result = await asyncio.to_thread(
+            generate_bi_summary, user.client_id, req.query, None, user.user_id
+        )
         return result
     except Exception as e:
         logger.error(f"BI Summary Error: {e}")
         raise HTTPException(status_code=502, detail="BI summary generation failed. Please try again.")
-@app.post("/api/v1/predictive/forecast")
+@app.post("/api/v1/predictive/forecast", tags=["Predictive & Forecasting"])
 async def get_forecast(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.predictive_forecaster import generate_forecast
@@ -575,7 +639,7 @@ class ScenarioRequest(BaseModel):
     cash_reserves: Optional[float] = Field(None, ge=0, description="Optional override of the assumed cash reserve used for the runway figure. Omit to use the platform-wide assumed reserve (see the Assumption Ledger).")
 
 
-@app.post("/api/v1/predictive/scenario")
+@app.post("/api/v1/predictive/scenario", tags=["Predictive & Forecasting"])
 async def run_scenario_endpoint(req: ScenarioRequest, client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         from backend.agents.scenario_modeler import run_scenario
@@ -590,7 +654,7 @@ async def run_scenario_endpoint(req: ScenarioRequest, client_id: str = Depends(v
         raise HTTPException(status_code=502, detail="Scenario modeling failed. Please try again.")
 
 
-@app.get("/api/v1/finance/forecast-accuracy")
+@app.get("/api/v1/finance/forecast-accuracy", tags=["Predictive & Forecasting"])
 async def get_forecast_accuracy_endpoint(client_id: str = Depends(verify_jwt_and_get_client_id)):
     # FIN-04: backtesting -- compares every forecast this tenant has ever
     # generated (predictive_forecaster.generate_forecast now snapshots each
@@ -604,7 +668,7 @@ async def get_forecast_accuracy_endpoint(client_id: str = Depends(verify_jwt_and
     except Exception as e:
         logger.error(f"Forecast Accuracy Error: {e}")
         raise HTTPException(status_code=502, detail="Forecast accuracy lookup failed. Please try again.")
-@app.post("/api/v1/saas/strategy")
+@app.post("/api/v1/saas/strategy", tags=["SaaS Strategy"])
 async def get_saas_strategy(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.saas_strategist import generate_strategy
@@ -613,7 +677,7 @@ async def get_saas_strategy(client_id: str = Depends(enforce_budget_gate)):
     except Exception as e:
         logger.error(f"SaaS Strategist Error: {e}")
         raise HTTPException(status_code=502, detail="Strategy generation failed. Please try again.")
-@app.post("/api/v1/bi/chart-suite")
+@app.post("/api/v1/bi/chart-suite", tags=["BI & Analytics"])
 async def get_chart_suite(client_id: str = Depends(enforce_budget_gate)):
     # generate_chart_suite is `async` and MUST be awaited directly here, on
     # this same running event loop -- NOT wrapped in asyncio.to_thread(...).
@@ -633,7 +697,7 @@ async def get_chart_suite(client_id: str = Depends(enforce_budget_gate)):
     except Exception as e:
         logger.error(f"Chart Suite Error: {e}")
         raise HTTPException(status_code=502, detail="Chart suite generation failed. Please try again.")
-@app.post("/api/v1/finance/analytics-summary")
+@app.post("/api/v1/finance/analytics-summary", tags=["BI & Analytics"])
 async def get_analytics_summary(client_id: str = Depends(verify_jwt_and_get_client_id)):
     # Real, pure-arithmetic replacement for the numbers
     # AdvancedAnalyticsDashboard.tsx used to hardcode client-side
@@ -680,7 +744,7 @@ async def get_analytics_summary(client_id: str = Depends(verify_jwt_and_get_clie
     except Exception as e:
         logger.error(f"Analytics Summary Error: {e}")
         raise HTTPException(status_code=502, detail="Analytics summary generation failed. Please try again.")
-@app.post("/api/v1/reports/stakeholder")
+@app.post("/api/v1/reports/stakeholder", tags=["Reports"])
 async def get_stakeholder_report(client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.report_generator import generate_stakeholder_report
@@ -689,6 +753,68 @@ async def get_stakeholder_report(client_id: str = Depends(enforce_budget_gate)):
     except Exception as e:
         logger.error(f"Report Generator Error: {e}")
         raise HTTPException(status_code=502, detail="Stakeholder report generation failed. Please try again.")
+
+
+_EXPORT_MEDIA_TYPES = {"csv": "text/csv", "pdf": "application/pdf"}
+
+
+# REP-01 (28 Aug 2026): the JSON endpoint above always existed; this is the
+# first real, downloadable-file export -- CSV and PDF, both rendered from
+# the exact same generate_stakeholder_report() dict the JSON endpoint
+# returns (see backend/report_export.py's module docstring), so there is
+# no second code path that could ever show different numbers than the
+# JSON view of the same report. "Secure sharing and expiration" (REP-01's
+# other named half -- a shareable external link) is NOT built here; see
+# report_export.py's docstring for why that's a real policy call, not a
+# mechanical one. enforce_budget_gate_for_user (not the plain client_id
+# variant the JSON endpoint uses) is used here specifically so the export
+# audit trail (REP-02) can record which user, not just which tenant,
+# triggered each download.
+@app.get("/api/v1/reports/stakeholder/export", tags=["Reports"])
+async def export_stakeholder_report(
+    format: str,
+    user: AuthenticatedUser = Depends(enforce_budget_gate_for_user),
+):
+    if format not in _EXPORT_MEDIA_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported export format '{format}'. Use 'csv' or 'pdf'.")
+
+    from backend.db_manager import log_report_export
+    try:
+        from backend.agents.report_generator import generate_stakeholder_report
+        from backend.report_export import render_report_csv, render_report_pdf
+        report = await asyncio.to_thread(generate_stakeholder_report, user.client_id)
+        content = (
+            render_report_csv(report) if format == "csv"
+            else render_report_pdf(report, user.client_id)
+        )
+    except Exception as e:
+        logger.error(f"Report export error ({format}): {e}")
+        await log_report_export(user.client_id, user.user_id, "stakeholder", format, "ERROR")
+        raise HTTPException(status_code=502, detail="Report export failed. Please try again.")
+
+    await log_report_export(user.client_id, user.user_id, "stakeholder", format, "SUCCESS")
+    safe_client_id = "".join(c for c in user.client_id if c.isalnum() or c in "-_")
+    filename = f"stakeholder_report_{safe_client_id}_{datetime.utcnow().strftime('%Y%m%d')}.{format}"
+    return Response(
+        content=content,
+        media_type=_EXPORT_MEDIA_TYPES[format],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/v1/reports/export-history", tags=["Reports"])
+async def get_report_export_history_endpoint(
+    limit: int = 50,
+    user: AuthenticatedUser = Depends(require_role("owner", "admin")),
+):
+    # REP-02: read side of the export audit trail. Owner/admin-only --
+    # unlike the export endpoint itself (any authenticated tenant member
+    # can download their own copy of the report), seeing WHO on the team
+    # downloaded it is scoped the same way other cross-member visibility
+    # already is elsewhere (e.g. the platform metrics endpoints).
+    from backend.db_manager import get_report_export_history
+    history = await get_report_export_history(user.client_id, limit)
+    return {"exports": history}
 
 
 class TelemetryScoutRequest(BaseModel):
@@ -703,7 +829,7 @@ class TelemetryScoutRequest(BaseModel):
     query: str = Field("", max_length=2000, description="Optional context for the LLM commentary layer -- purely descriptive, never used to alter the deterministic schema mapping itself.")
 
 
-@app.post("/api/v1/telemetry/map-schema")
+@app.post("/api/v1/telemetry/map-schema", tags=["Telemetry & Metrics"])
 async def map_external_telemetry_schema(req: TelemetryScoutRequest, client_id: str = Depends(enforce_budget_gate)):
     try:
         from backend.agents.external_telemetry_scout import execute_task
@@ -763,7 +889,7 @@ def _extract_knowledge_text(file_path: str, ext: str) -> str:
     raise HTTPException(status_code=400, detail=f"Unsupported file type '{ext}'. Supported: {', '.join(sorted(KNOWLEDGE_SUPPORTED_EXTENSIONS))}.")
 
 
-@app.post("/api/v1/knowledge/upload")
+@app.post("/api/v1/knowledge/upload", tags=["Knowledge Base"])
 async def upload_knowledge_document(
     file: UploadFile = File(...),
     user: AuthenticatedUser = Depends(require_role("owner", "admin", "member")),
@@ -777,8 +903,11 @@ async def upload_knowledge_document(
             detail=f"Unsupported file type '{ext or '(none)'}'. Supported: {', '.join(sorted(KNOWLEDGE_SUPPORTED_EXTENSIONS))}.",
         )
 
-    temp_dir = Path("/tmp/eivanta_knowledge")
+    # SEC-03 SAST (28 Aug 2026, bandit B108): see the matching comment on
+    # the ledger-upload endpoint above -- same fix, same reasoning.
+    temp_dir = Path("/tmp/eivanta_knowledge")  # nosec B108 -- locked to 0700 immediately below, unconditionally, every request
     temp_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(temp_dir, 0o700)
     file_path = temp_dir / f"{client_id}_{uuid.uuid4().hex}_{safe_filename}"
     bytes_written = 0
     try:
@@ -813,7 +942,7 @@ class KnowledgeQueryRequest(BaseModel):
     limit: int = Field(default=5, ge=1, le=20)
 
 
-@app.post("/api/v1/knowledge/query")
+@app.post("/api/v1/knowledge/query", tags=["Knowledge Base"])
 async def query_knowledge_document(req: KnowledgeQueryRequest, client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         from backend.app.core.rag import query_knowledge_base
@@ -824,7 +953,7 @@ async def query_knowledge_document(req: KnowledgeQueryRequest, client_id: str = 
         raise HTTPException(status_code=502, detail="Knowledge base search failed. Please try again.")
 
 
-@app.get("/api/v1/knowledge/documents")
+@app.get("/api/v1/knowledge/documents", tags=["Knowledge Base"])
 async def list_knowledge_documents(client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         from backend.app.core.rag import list_documents
@@ -835,7 +964,7 @@ async def list_knowledge_documents(client_id: str = Depends(verify_jwt_and_get_c
         raise HTTPException(status_code=502, detail="Could not load knowledge base documents.")
 
 
-@app.delete("/api/v1/knowledge/documents/{doc_id}")
+@app.delete("/api/v1/knowledge/documents/{doc_id}", tags=["Knowledge Base"])
 async def delete_knowledge_document(doc_id: str, user: AuthenticatedUser = Depends(require_role("owner", "admin", "member"))):
     try:
         from backend.app.core.rag import delete_document

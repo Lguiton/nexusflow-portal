@@ -27,6 +27,7 @@ class SwarmState(TypedDict):
     sample_payload: Optional[Any]
     session_id: Optional[str]
     conversation_history: List[Dict[str, Any]]
+    user_id: Optional[int]
 def _in_running_loop() -> bool:
     try:
         asyncio.get_running_loop()
@@ -87,7 +88,11 @@ def execute_virtual_cfo(state: SwarmState) -> SwarmState:
             from backend.agents.virtual_cfo import generate_cfo_briefing
         except ImportError:
             from agents.virtual_cfo import generate_cfo_briefing
-        state["results"]["virtual_cfo"] = generate_cfo_briefing(state["client_id"])
+        # AI-08: mechanical follow-up to Track 4's original BI Engineer
+        # wiring -- see execute_bi_engineer's comment below for the history.
+        state["results"]["virtual_cfo"] = generate_cfo_briefing(
+            state["client_id"], conversation_history=state.get("conversation_history") or [],
+        )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
         _sync_log_task("virtual_cfo", "COMPLETE", exec_time)
@@ -108,7 +113,10 @@ def execute_data_engineer(state: SwarmState) -> SwarmState:
             from backend.agents.data_engineer import analyze_schema_quality
         except ImportError:
             from agents.data_engineer import analyze_schema_quality
-        state["results"]["data_engineer"] = analyze_schema_quality(state["client_id"])
+        # AI-08: mechanical follow-up -- see execute_bi_engineer's comment below.
+        state["results"]["data_engineer"] = analyze_schema_quality(
+            state["client_id"], conversation_history=state.get("conversation_history") or [],
+        )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
         _sync_log_task("data_engineer", "COMPLETE", exec_time)
@@ -133,11 +141,14 @@ def execute_bi_engineer(state: SwarmState) -> SwarmState:
         # Engineer folds in the ad hoc Q&A duties (Data Analyst #04), making
         # it the most naturally conversational agent (follow-up questions
         # like "what about last month?" only resolve with real prior
-        # context). Other agents are one-shot briefings/reports today, not
-        # wired to history yet -- same honest partial-rollout discipline as
-        # BYOK's rollout (ops_shield.py first, rest mechanical follow-up).
+        # context). AI-08 (27 Aug 2026): the other 7 agent functions are now
+        # wired to the same history too -- mechanical follow-up, same
+        # partial-rollout-then-complete pattern BYOK's rollout used
+        # (ops_shield.py first, rest mechanical follow-up).
         state["results"]["bi_engineer"] = generate_bi_summary(
-            state["client_id"], state["query"], conversation_history=state.get("conversation_history") or []
+            state["client_id"], state["query"],
+            conversation_history=state.get("conversation_history") or [],
+            user_id=state.get("user_id"),
         )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
@@ -159,7 +170,10 @@ def execute_predictive_forecaster(state: SwarmState) -> SwarmState:
             from backend.agents.predictive_forecaster import generate_forecast
         except ImportError:
             from agents.predictive_forecaster import generate_forecast
-        state["results"]["predictive_forecaster"] = generate_forecast(state["client_id"])
+        # AI-08: mechanical follow-up -- see execute_bi_engineer's comment above.
+        state["results"]["predictive_forecaster"] = generate_forecast(
+            state["client_id"], conversation_history=state.get("conversation_history") or [],
+        )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
         _sync_log_task("predictive_forecaster", "COMPLETE", exec_time)
@@ -180,7 +194,10 @@ def execute_saas_strategist(state: SwarmState) -> SwarmState:
             from backend.agents.saas_strategist import generate_strategy
         except ImportError:
             from agents.saas_strategist import generate_strategy
-        state["results"]["saas_strategist"] = generate_strategy(state["client_id"])
+        # AI-08: mechanical follow-up -- see execute_bi_engineer's comment above.
+        state["results"]["saas_strategist"] = generate_strategy(
+            state["client_id"], conversation_history=state.get("conversation_history") or [],
+        )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
         _sync_log_task("saas_strategist", "COMPLETE", exec_time)
@@ -201,7 +218,10 @@ def execute_report_generator(state: SwarmState) -> SwarmState:
             from backend.agents.report_generator import generate_stakeholder_report
         except ImportError:
             from agents.report_generator import generate_stakeholder_report
-        state["results"]["report_generator"] = generate_stakeholder_report(state["client_id"])
+        # AI-08: mechanical follow-up -- see execute_bi_engineer's comment above.
+        state["results"]["report_generator"] = generate_stakeholder_report(
+            state["client_id"], conversation_history=state.get("conversation_history") or [],
+        )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
         _sync_log_task("report_generator", "COMPLETE", exec_time)
@@ -222,7 +242,10 @@ def execute_bi_visualization_architect(state: SwarmState) -> SwarmState:
             from backend.agents.bi_visualization_architect import execute_task as bi_viz_execute_task
         except ImportError:
             from agents.bi_visualization_architect import execute_task as bi_viz_execute_task
-        state["results"]["bi_visualization_architect"] = bi_viz_execute_task(state["client_id"], state["query"])
+        # AI-08: mechanical follow-up -- see execute_bi_engineer's comment above.
+        state["results"]["bi_visualization_architect"] = bi_viz_execute_task(
+            state["client_id"], state["query"], conversation_history=state.get("conversation_history") or [],
+        )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
         _sync_log_task("bi_visualization_architect", "COMPLETE", exec_time)
@@ -243,8 +266,10 @@ def execute_external_telemetry_scout(state: SwarmState) -> SwarmState:
             from backend.agents.external_telemetry_scout import execute_task as telemetry_execute_task
         except ImportError:
             from agents.external_telemetry_scout import execute_task as telemetry_execute_task
+        # AI-08: mechanical follow-up -- see execute_bi_engineer's comment above.
         state["results"]["external_telemetry_scout"] = telemetry_execute_task(
-            state["client_id"], state["query"], state.get("sample_payload")
+            state["client_id"], state["query"], state.get("sample_payload"),
+            conversation_history=state.get("conversation_history") or [],
         )
         state["status"] = "COMPLETE"
         exec_time = time.time() - start_time
@@ -366,7 +391,19 @@ def _compute_confidence_score(agent_name: str, agent_result: Any) -> float:
         if isinstance(r_squared, (int, float)):
             return round(float(r_squared), 4)
     return 1.0
-def route_query(query: str, client_id: str, session_id: Optional[str] = None, sample_payload: Optional[Any] = None) -> dict:
+def route_query(
+    query: str, client_id: str, session_id: Optional[str] = None,
+    sample_payload: Optional[Any] = None, user_id: Optional[int] = None,
+) -> dict:
+    """
+    SQL-03 (27 Aug 2026): `user_id` (optional, default None) is the
+    authenticated user who issued this query, when known -- carried through
+    SwarmState into execute_bi_engineer so the query_audit trail can
+    attribute the eventual audit row to a real user, not just a tenant.
+    Callers that omit it (e.g. tooling/regression scripts) are unaffected;
+    the audit row's user_id is simply NULL in that case, exactly as before
+    this parameter existed.
+    """
     connection_key = f"{client_id}:{session_id}" if session_id else None
     # Track 4: fetch this session's recent history BEFORE the graph runs so
     # a routed agent can ground a follow-up question in what was actually
@@ -384,6 +421,7 @@ def route_query(query: str, client_id: str, session_id: Optional[str] = None, sa
         "sample_payload": sample_payload,
         "session_id": session_id,
         "conversation_history": conversation_history,
+        "user_id": user_id,
     }
     final_state = app_graph.invoke(initial_state)
     active_agent = final_state.get("active_agent")

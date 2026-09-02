@@ -95,6 +95,90 @@ HEADER_ALIAS_MAP = {
     "details": "description",
 }
 
+# DATA-02 (fuzzy/typo-tolerant matching, 27 Aug 2026): the alias map above
+# is an exact-match table -- a real-world typo in a header (e.g.
+# "catagory", "descrption", "amuont") matches nothing in it, and every
+# canonical column except 'amount' has a silent default (missing category
+# -> "Uncategorized", missing date -> today, missing description -> a
+# placeholder) -- meaning a MISTYPED header didn't error, it silently
+# DROPPED the tenant's real column and replaced it with a placeholder for
+# every row. This vocabulary is what a header gets fuzzy-matched against
+# when it survives exact matching unresolved: every alias key (mapping to
+# its existing resolution) plus the canonical names themselves (mapping to
+# themselves), so a fuzzy hit and an exact hit always land on the same
+# target for the same underlying header.
+_KNOWN_HEADER_VOCAB: dict = dict(HEADER_ALIAS_MAP)
+for _canonical in ("amount", "category", "date", "description", "revenue", "expense", "cost"):
+    _KNOWN_HEADER_VOCAB.setdefault(_canonical, _canonical)
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """
+    Optimal String Alignment (restricted Damerau-Levenshtein): insertion,
+    deletion, substitution, PLUS an adjacent-character transposition as a
+    single edit. Plain Levenshtein charges a transposed pair (e.g.
+    "amuont" vs "amount") as 2 substitutions, which put a very common
+    class of real typo just outside a tight, deliberately-small budget --
+    OSA charges it as the 1 edit it actually is. Full 2D DP table (not the
+    cheaper single-row form _fuzzy_resolve_header's plain-Levenshtein
+    predecessor used) because the transposition check needs to look back
+    two rows, not one; still trivial cost for header-length strings.
+    """
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    la, lb = len(a), len(b)
+    d = [[0] * (lb + 1) for _ in range(la + 1)]
+    for i in range(la + 1):
+        d[i][0] = i
+    for j in range(lb + 1):
+        d[0][j] = j
+    for i in range(1, la + 1):
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            d[i][j] = min(
+                d[i - 1][j] + 1,        # deletion
+                d[i][j - 1] + 1,        # insertion
+                d[i - 1][j - 1] + cost  # substitution
+            )
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)  # adjacent transposition
+    return d[la][lb]
+
+
+def _fuzzy_resolve_header(header: str) -> Optional[str]:
+    """
+    DATA-02: typo-tolerant fallback for a header that did NOT survive
+    exact alias resolution (HEADER_ALIAS_MAP, or already being a
+    canonical name). Matches against _KNOWN_HEADER_VOCAB using a
+    length-scaled edit-distance budget -- generous enough to catch a real
+    one/two-character typo on a longer word, tight enough that a short,
+    unrelated header doesn't accidentally collide with a short canonical
+    name (a 3-char header gets a budget of only 1).
+
+    Deliberately returns None (leaving the header exactly as-is, so
+    today's existing default/rejection behavior applies unchanged) when
+    the header matches zero OR MORE THAN ONE distinct canonical target
+    within budget -- an ambiguous fuzzy match is not guessed at, the same
+    "explicit gap over a silent guess" preference already used elsewhere
+    in this file (e.g. the ambiguous-amount-column rejection below).
+    """
+    if not header or header in _KNOWN_HEADER_VOCAB:
+        return None
+    budget = max(1, len(header) // 5)
+    matches = set()
+    for candidate, resolved in _KNOWN_HEADER_VOCAB.items():
+        if abs(len(candidate) - len(header)) > budget:
+            continue  # cheap pre-filter before the O(n*m) DP call below
+        if _edit_distance(header, candidate) <= budget:
+            matches.add(resolved)
+        if len(matches) > 1:
+            return None  # already ambiguous, no need to keep scanning
+    return matches.pop() if len(matches) == 1 else None
+
 async def init_db():
     lock = get_db_lock()
     def _init():
@@ -1286,7 +1370,12 @@ async def update_tenant_billing(
                 if not sets:
                     return
                 params.append(client_id)
-                conn.execute(f"UPDATE tenants SET {', '.join(sets)} WHERE client_id = ?", params)
+                # SEC-03 SAST (28 Aug 2026): bandit B608 false positive --
+                # `sets` can only ever contain the 3 hardcoded literal
+                # strings above ("stripe_customer_id = ?", etc.), never
+                # anything derived from a caller argument's VALUE; every
+                # real value is bound via `params` as a `?` placeholder.
+                conn.execute(f"UPDATE tenants SET {', '.join(sets)} WHERE client_id = ?", params)  # nosec B608
             finally:
                 conn.close()
     return await asyncio.to_thread(_update)
@@ -1470,7 +1559,12 @@ def _rows_to_dicts(conn, table: str, client_id: str, exclude_cols: tuple = (), e
     if not cols:
         return []
     col_list = ", ".join(cols)
-    rows = conn.execute(f"SELECT {col_list} FROM {table} WHERE client_id = ?", [client_id]).fetchall()
+    # SEC-03 SAST (28 Aug 2026): bandit B608 false positive -- `cols` comes
+    # from a real PRAGMA table_info(table) introspection (DB schema, never
+    # user input), and `table` is only ever called with entries from the
+    # fixed _TENANT_SCOPED_TABLES tuple below (a Python source constant) --
+    # see export_tenant_data's own call site. client_id is always bound.
+    rows = conn.execute(f"SELECT {col_list} FROM {table} WHERE client_id = ?", [client_id]).fetchall()  # nosec B608
     out = []
     for row in rows:
         d = {}
@@ -1563,8 +1657,13 @@ async def delete_tenant_permanently(client_id: str) -> Optional[dict]:
                         if table not in existing:
                             counts[table] = 0
                             continue
-                        n = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE client_id = ?", [client_id]).fetchone()[0]
-                        conn.execute(f"DELETE FROM {table} WHERE client_id = ?", [client_id])
+                        # SEC-03 SAST (28 Aug 2026): bandit B608 false
+                        # positive on both lines below -- `table` only ever
+                        # comes from iterating the fixed
+                        # _TENANT_SCOPED_TABLES tuple (a Python source
+                        # constant) just above; client_id is always bound.
+                        n = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE client_id = ?", [client_id]).fetchone()[0]  # nosec B608
+                        conn.execute(f"DELETE FROM {table} WHERE client_id = ?", [client_id])  # nosec B608
                         counts[table] = n
                     conn.execute("DELETE FROM tenants WHERE client_id = ?", [client_id])
                     conn.execute("COMMIT")
@@ -1811,7 +1910,7 @@ async def log_lineage_entry(
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"Failed to log lineage entry for tenant '{client_id}': {e}")
             finally:
                 conn.close()
@@ -2310,6 +2409,24 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
         # this runs here (after strip+lower, before the duplicate check).
         df.columns = [HEADER_ALIAS_MAP.get(c, c) for c in df.columns]
 
+        # DATA-02 (fuzzy/typo-tolerant matching): whatever didn't survive
+        # the exact alias map above gets one more chance via
+        # _fuzzy_resolve_header -- see that function's own docstring for
+        # the matching/ambiguity rules. Tracked separately (rather than
+        # folded silently into the same list comprehension) so the
+        # success message below can disclose exactly which header(s), if
+        # any, were reinterpreted -- this never happens invisibly.
+        fuzzy_resolutions: dict = {}
+        new_columns = []
+        for c in df.columns:
+            resolved = _fuzzy_resolve_header(c)
+            if resolved:
+                fuzzy_resolutions[c] = resolved
+                new_columns.append(resolved)
+            else:
+                new_columns.append(c)
+        df.columns = new_columns
+
         # DATA-03: duplicate column names after normalization would silently
         # shadow each other during the amount/category/date lookups below
         # (pandas keeps both columns but dict-style access returns only one
@@ -2398,6 +2515,22 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
             )
         if skipped_count:
             clean_df = clean_df[~invalid_mask]
+
+        # DATA-02: NOT extending the amount check's "100% unparseable ->
+        # reject the whole file" reasoning to date, on purpose. Tried this
+        # during development, caught by the full regression suite: a row
+        # with an unparseable date but a real amount/category/description
+        # is still real, useful data (unlike amount, where an unparseable
+        # value means the row has no number at all) -- this codebase
+        # already has a deliberate, shipped, tested design for the "every
+        # row's date is unparseable" case: ingestion still succeeds, the
+        # count is disclosed in the message below, and downstream,
+        # virtual_cfo.generate_cfo_briefing reports a distinct
+        # NO_DATEABLE_DATA status rather than crashing or misreporting
+        # NO_DATA (see test_virtual_cfo_evidence.py's
+        # test_no_dateable_data_status_when_every_row_unparseable). Adding
+        # a hard rejection here would silently break that already-correct
+        # behavior for no real benefit.
     except ValueError as e:
         await log_ingestion_attempt(client_id, display_name, file_hash, "REJECTED", 0, 0, str(e))
         raise
@@ -2437,7 +2570,7 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"CSV Ingestion Failed for tenant '{client_id}': {e}")
                 raise
             finally:
@@ -2449,6 +2582,9 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
         raise
 
     message = f"Successfully ingested {row_count} records for tenant '{client_id}'."
+    if fuzzy_resolutions:
+        pairs = ", ".join(f"'{orig}' -> '{resolved}'" for orig, resolved in sorted(fuzzy_resolutions.items()))
+        message += f" Note: interpreted these column header(s) by typo-tolerant match: {pairs}."
     if skipped_count:
         message += f" Skipped {skipped_count} row(s) with an unparseable amount value."
     if date_unparseable_count:
@@ -2900,7 +3036,7 @@ async def init_telemetry_schema():
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"Telemetry schema init failed: {e}")
             finally:
                 conn.close()
@@ -2921,7 +3057,7 @@ async def log_task_execution(agent_name: str, status: str, execution_time_sec: f
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"Failed to log telemetry: {e}")
             finally:
                 conn.close()
@@ -3007,7 +3143,16 @@ async def get_advanced_telemetry(window: int = 100) -> dict:
             finally:
                 conn.close()
     return await asyncio.to_thread(_calc)
-async def log_query_audit(client_id: str, natural_language_query: str, generated_query: str, row_count: int, status: str):
+async def log_query_audit(client_id: str, natural_language_query: str, generated_query: str, row_count: int, status: str, user_id: Optional[int] = None):
+    """
+    SQL-03: query audit trail. `user_id` was added 27 Aug 2026 -- prior to this
+    the table was scoped to tenant only (no per-user attribution), since no
+    user-level auth existed at the time this table was first created. The
+    column is added via a lazy migration guard below (mirroring the
+    device_label/session_started_at pattern used for AUTH-06's MFA rollout)
+    rather than in the central init_db() migration block, matching how this
+    table has always been created -- lazily, on first audit write.
+    """
     lock = get_db_lock()
     def _log():
         with lock:
@@ -3026,21 +3171,115 @@ async def log_query_audit(client_id: str, natural_language_query: str, generated
                         status VARCHAR
                     )
                 """)
+                query_audit_cols = [r[1] for r in conn.execute("PRAGMA table_info('query_audit')").fetchall()]
+                if "user_id" not in query_audit_cols:
+                    try:
+                        conn.execute("ALTER TABLE query_audit ADD COLUMN user_id BIGINT")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
                 conn.execute(
-                    "INSERT INTO query_audit (client_id, natural_language_query, generated_query, row_count, status) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [client_id, natural_language_query, generated_query, row_count, status]
+                    "INSERT INTO query_audit (client_id, natural_language_query, generated_query, row_count, status, user_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [client_id, natural_language_query, generated_query, row_count, status, user_id]
                 )
                 conn.execute("COMMIT")
             except Exception as e:
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"Failed to log query audit trail: {e}")
             finally:
                 conn.close()
     await asyncio.to_thread(_log)
+
+
+async def log_report_export(
+    client_id: str, user_id: Optional[int], report_type: str,
+    export_format: str, status: str
+) -> None:
+    """
+    REP-02: audit trail for report exports (who downloaded what, in what
+    format, when). Mirrors log_query_audit's own table-lazy-creation
+    pattern exactly -- same reasoning: this table has no reason to exist
+    until the first real export happens, and every table this codebase
+    creates lazily follows this same CREATE SEQUENCE + CREATE TABLE IF NOT
+    EXISTS shape so a fresh tenant database never needs a separate up-front
+    migration step for it. Fails open on a logging failure (same posture
+    as every other audit/telemetry logger here) -- a broken audit log must
+    never itself block a tenant from downloading their own report.
+    """
+    lock = get_db_lock()
+    def _log():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute("BEGIN TRANSACTION")
+                conn.execute("""
+                    CREATE SEQUENCE IF NOT EXISTS report_export_audit_id_seq;
+                    CREATE TABLE IF NOT EXISTS report_export_audit (
+                        audit_id BIGINT DEFAULT nextval('report_export_audit_id_seq'),
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        client_id VARCHAR,
+                        user_id BIGINT,
+                        report_type VARCHAR,
+                        export_format VARCHAR,
+                        status VARCHAR
+                    )
+                """)
+                conn.execute(
+                    "INSERT INTO report_export_audit (client_id, user_id, report_type, export_format, status) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [client_id, user_id, report_type, export_format, status]
+                )
+                conn.execute("COMMIT")
+            except Exception as e:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
+                logger.error(f"Failed to log report export audit trail: {e}")
+            finally:
+                conn.close()
+    await asyncio.to_thread(_log)
+
+
+async def get_report_export_history(client_id: str, limit: int = 50) -> list:
+    """
+    REP-02: read side of the export audit trail -- lets a tenant (owner/
+    admin, gated at the router) see who exported what, when. Returns []
+    if the table doesn't exist yet for this tenant's database (no export
+    has ever happened), same "no fabricated error on an empty/missing
+    table" posture as _rows_to_dicts uses for tenant export/deletion.
+    """
+    lock = get_db_lock()
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                existing = _existing_tables(conn)
+                if "report_export_audit" not in existing:
+                    return []
+                rows = conn.execute(
+                    "SELECT audit_id, timestamp, user_id, report_type, export_format, status "
+                    "FROM report_export_audit WHERE client_id = ? ORDER BY timestamp DESC LIMIT ?",
+                    [client_id, limit]
+                ).fetchall()
+                return [
+                    {
+                        "audit_id": r[0],
+                        "timestamp": str(r[1]),
+                        "user_id": r[2],
+                        "report_type": r[3],
+                        "export_format": r[4],
+                        "status": r[5],
+                    }
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
 
 
 async def log_ingestion_attempt(
@@ -3085,7 +3324,7 @@ async def log_ingestion_attempt(
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 # Deliberately does NOT re-raise -- a failure to WRITE the
                 # audit log must never block or fail the ingestion request
                 # itself, same principle as log_task_execution/log_query_audit
@@ -3183,7 +3422,7 @@ async def log_conversation_turn(
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"Failed to log conversation turn: {e}")
             finally:
                 conn.close()
@@ -3288,7 +3527,7 @@ async def delete_tenant_ledger(client_id: str) -> int:
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"Failed to delete ledger data for tenant '{client_id}': {e}")
                 raise
             finally:
@@ -3389,7 +3628,7 @@ async def log_ai_usage(
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"Failed to log AI usage telemetry for agent '{agent_name}': {e}")
             finally:
                 conn.close()
@@ -3561,7 +3800,7 @@ async def log_forecast_snapshot(client_id: str, last_historical_period: str, met
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
                 logger.error(f"Failed to log forecast snapshot for tenant '{client_id}': {e}")
             finally:
                 conn.close()

@@ -28,7 +28,7 @@ class ApplyCategorySuggestionRequest(BaseModel):
     new_category: str
 
 
-@router.post("/api/v1/data/category-suggestions")
+@router.post("/api/v1/data/category-suggestions", tags=["Ledger & Ingestion"])
 async def get_category_suggestions(client_id: str = Depends(verify_jwt_and_get_client_id)):
     try:
         return await db_manager.suggest_category_fixes(client_id)
@@ -37,7 +37,7 @@ async def get_category_suggestions(client_id: str = Depends(verify_jwt_and_get_c
         raise HTTPException(status_code=502, detail="Unable to compute category suggestions right now.")
 
 
-@router.post("/api/v1/data/apply-category-suggestion")
+@router.post("/api/v1/data/apply-category-suggestion", tags=["Ledger & Ingestion"])
 async def apply_category_suggestion_endpoint(
     req: ApplyCategorySuggestionRequest,
     # RBAC-01: mutates real ledger data -- viewer excluded.

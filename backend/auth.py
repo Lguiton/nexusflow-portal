@@ -142,6 +142,14 @@ def _decode_and_build_user(authorization: Optional[str]) -> AuthenticatedUser:
     )
 
 
+async def _tenant_lifecycle_status(client_id: str) -> Optional[str]:
+    try:
+        from backend import db_manager
+    except ImportError:
+        import db_manager  # type: ignore
+    return await db_manager.get_tenant_lifecycle_status(client_id)
+
+
 async def _raise_if_suspended(client_id: str) -> None:
     """
     TEN-01/TEN-02: shared suspension gate. A missing tenant ROW (get_tenant_
@@ -154,11 +162,7 @@ async def _raise_if_suspended(client_id: str) -> None:
     Suspension itself (a real, deliberately-set value) still fails CLOSED --
     that's the actual security property TEN-01/TEN-02 exists to provide.
     """
-    try:
-        from backend import db_manager
-    except ImportError:
-        import db_manager  # type: ignore
-    status = await db_manager.get_tenant_lifecycle_status(client_id)
+    status = await _tenant_lifecycle_status(client_id)
     if status == "suspended":
         raise HTTPException(
             status_code=423,
@@ -167,6 +171,26 @@ async def _raise_if_suspended(client_id: str) -> None:
                 "from Trust & Gaps, or export/delete the tenant's data."
             ),
         )
+
+
+async def is_tenant_suspended(client_id: str) -> bool:
+    """
+    TEN-02 (27 Aug 2026): the WebSocket equivalent of _raise_if_suspended.
+    A WebSocket route can't return an HTTP response, so it can't raise
+    HTTPException -- the caller (backend/routers/swarm.py) checks this bool
+    itself and closes the socket. Shares the exact same underlying lookup
+    and the same fail-OPEN-on-missing-row / fail-CLOSED-on-real-suspension
+    trade-off as _raise_if_suspended above, so the two paths can never
+    silently disagree about whether a given tenant is suspended.
+
+    This was the one disclosed gap left open by TEN-02's original pass
+    (see the v2.4->v2.5 Change Log): every REST endpoint got the
+    suspension gate for free through verify_jwt_and_get_user, but the
+    swarm WebSocket route authenticates through the separate
+    verify_ws_token path and was never wired to it -- a suspended tenant
+    could still open a live swarm-telemetry connection.
+    """
+    return await _tenant_lifecycle_status(client_id) == "suspended"
 
 
 async def verify_jwt_and_get_user(

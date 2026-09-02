@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import duckdb
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from dotenv import load_dotenv
 
 try:
@@ -277,7 +277,28 @@ def _template_sections(metrics: Dict[str, Any], net_income: float) -> list:
     ]
 
 
-def generate_stakeholder_report(client_id: str = "default_client") -> Dict[str, Any]:
+def _format_history_for_prompt(conversation_history: Optional[List[Dict[str, Any]]]) -> str:
+    """AI-08 mechanical follow-up: identical to bi_engineer.py's original
+    Track 4 implementation. See virtual_cfo.py's copy for the full rationale
+    on why this is duplicated per-agent rather than centralized."""
+    if not conversation_history:
+        return ""
+    lines = []
+    for turn in conversation_history:
+        role = turn.get("role", "user")
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return "\n    Recent conversation in this session (oldest first):\n    " + "\n    ".join(lines)
+
+
+def generate_stakeholder_report(
+    client_id: str = "default_client",
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
     Agent #06 (Report Generator). Synthesizes real per-tenant ledger data --
     revenue, expenses, net income, category concentration, and
@@ -287,6 +308,10 @@ def generate_stakeholder_report(client_id: str = "default_client") -> Dict[str, 
     every figure here is either a direct query result or a number derived
     from one; nothing is invented, and no assumed/placeholder figures
     (e.g. Virtual CFO's assumed-cash-reserve runway) are included.
+
+    AI-08 (27 Aug 2026): `conversation_history` (optional, default None) --
+    see virtual_cfo.generate_cfo_briefing's docstring for the full rationale.
+    Additive only; callers that omit it keep today's exact behavior.
     """
     safe_client_id = "".join(c for c in client_id if c.isalnum() or c in "-_")
     metrics, db_failed, failure_reason = _gather_report_metrics(safe_client_id)
@@ -330,6 +355,7 @@ def generate_stakeholder_report(client_id: str = "default_client") -> Dict[str, 
 
     Synthesize an executive stakeholder debrief covering revenue realization, expense governance, and a
     strategic recommendation, using ONLY the real numbers above.
+    {_format_history_for_prompt(conversation_history)}
 
     You MUST respond in pure JSON using this exact structure:
     {{

@@ -36,7 +36,7 @@ class LedgerRowsRequest(BaseModel):
     date_to: Optional[str] = None
 
 
-@router.post("/api/v1/finance/ledger-rows")
+@router.post("/api/v1/finance/ledger-rows", tags=["Ledger & Ingestion"])
 async def get_ledger_rows_endpoint(
     req: LedgerRowsRequest = LedgerRowsRequest(),
     client_id: str = Depends(verify_jwt_and_get_client_id),

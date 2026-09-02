@@ -31,7 +31,7 @@ import json
 import os
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404 -- both call sites below use a fixed argv list, no shell=True, no external/untrusted input
 import sys
 import tempfile
 import time
@@ -79,7 +79,7 @@ async def main():
 
 asyncio.run(main())
 """
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec B603 -- fixed argv (sys.executable + this script's own literal seed_code), no shell, no external input
         [sys.executable, "-c", seed_code],
         cwd=project_root, capture_output=True, text=True, timeout=30,
     )
@@ -154,11 +154,11 @@ def main() -> int:
 
         port = _free_port()
         env = dict(os.environ)
-        env["JWT_SECRET"] = "verify-script-secret-not-for-production"
+        env["JWT_SECRET"] = "verify-script-secret-not-for-production"  # nosec B105 -- throwaway env for this script's own isolated temp subprocess only
         env.setdefault("OPENAI_API_KEY", "sk-verify-placeholder-not-a-real-key")
 
         print(f"Starting real backend.main:app on 127.0.0.1:{port} (isolated temp copy at {tmp_root}) ...")
-        server_proc = subprocess.Popen(
+        server_proc = subprocess.Popen(  # nosec B603 -- fixed argv, port is OS-assigned via _free_port(), no shell, no external input
             [sys.executable, "-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", str(port)],
             cwd=tmp_root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
@@ -182,7 +182,7 @@ def main() -> int:
                 try:
                     print(server_proc.stdout.read())
                 except Exception:
-                    pass
+                    pass  # nosec B110 -- best-effort extra debug output on an already-failing path; nothing more to do if this also fails
         return 1
     finally:
         if server_proc is not None and server_proc.poll() is None:

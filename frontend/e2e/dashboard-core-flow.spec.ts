@@ -49,6 +49,7 @@ test.describe.serial('Eivanta dashboard core flow', () => {
     // actual file on disk, not an in-memory blob.
     const csvPath = path.join(os.tmpdir(), `eivanta-e2e-${Date.now()}.csv`);
     const timestamp = Date.now();
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- csvPath is built from os.tmpdir() plus a Date.now() timestamp this test generates itself -- not user/external input
     fs.writeFileSync(
       csvPath,
       [

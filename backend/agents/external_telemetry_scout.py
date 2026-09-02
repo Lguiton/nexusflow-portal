@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Optional
 
 from dotenv import load_dotenv
 
@@ -71,12 +71,37 @@ def _infer_duckdb_type(value: Any) -> str:
     return "VARCHAR"  # covers str, None (unknown from a single null sample), and anything else
  
  
-def _summarize_with_llm(client_id: str, query: str, schema_mapping: Dict[str, str], sample_row: Dict[str, Any]) -> List[str]:
+def _format_history_for_prompt(conversation_history: Optional[List[Dict[str, Any]]]) -> str:
+    """AI-08 mechanical follow-up: identical to bi_engineer.py's original
+    Track 4 implementation. See virtual_cfo.py's copy for the full rationale
+    on why this is duplicated per-agent rather than centralized."""
+    if not conversation_history:
+        return ""
+    lines = []
+    for turn in conversation_history:
+        role = turn.get("role", "user")
+        content = str(turn.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return "\n    Recent conversation in this session (oldest first):\n    " + "\n    ".join(lines)
+
+
+def _summarize_with_llm(
+    client_id: str, query: str, schema_mapping: Dict[str, str], sample_row: Dict[str, Any],
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     """
     Optional commentary layer only. Unlike the previous version of this
     agent, the schema mapping below is already a real, verified fact by the
     time this runs -- the model is asked to comment on it (schema
     stability, naming, follow-up questions), never to invent it.
+
+    AI-08 (27 Aug 2026): `conversation_history` (optional, default None) --
+    see virtual_cfo.generate_cfo_briefing's docstring for the full rationale.
+    Additive only; callers that omit it keep today's exact behavior.
     """
     client = get_openai_client_for_tenant_sync(client_id, platform_api_key, AI_REQUEST_TIMEOUT_SECONDS, AI_MAX_RETRIES)
     if not client:
@@ -92,6 +117,7 @@ def _summarize_with_llm(client_id: str, query: str, schema_mapping: Dict[str, st
     (naming clarity, likely type-inference edge cases, follow-up questions
     to ask before creating a table from it) -- do not invent a different
     schema or claim to have fetched anything yourself.
+    {_format_history_for_prompt(conversation_history)}
     Respond STRICTLY in JSON: {{"insights": ["..."]}}
     """
     try:
@@ -117,7 +143,10 @@ def _summarize_with_llm(client_id: str, query: str, schema_mapping: Dict[str, st
         return []
  
  
-def execute_task(client_id: str = "default_client", query: str = "", sample_payload: Union[str, dict, list, None] = None) -> Dict[str, Any]:
+def execute_task(
+    client_id: str = "default_client", query: str = "", sample_payload: Union[str, dict, list, None] = None,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
     Real external-telemetry schema mapping: given a sample JSON payload
     (pasted or uploaded -- this function makes no outbound network calls of
@@ -125,6 +154,10 @@ def execute_task(client_id: str = "default_client", query: str = "", sample_payl
     mapping from it. No invented endpoints, no invented schemas. Does NOT
     create/alter any DuckDB table itself -- returns the proposed mapping
     and a data sample for review before any schema change is applied.
+
+    AI-08 (27 Aug 2026): `conversation_history` (optional, default None) --
+    see virtual_cfo.generate_cfo_briefing's docstring for the full rationale.
+    Additive only; callers that omit it keep today's exact behavior.
     """
     if sample_payload is None or sample_payload == "":
         return {
@@ -168,7 +201,7 @@ def execute_task(client_id: str = "default_client", query: str = "", sample_payl
         return {"agent": "External Telemetry Scout", "status": "ERROR", "insights": [f"Failed to flatten sample_payload: {e}"]}
  
     schema_mapping = {col: _infer_duckdb_type(val) for col, val in flat_sample.items()}
-    insights = _summarize_with_llm(client_id, query, schema_mapping, flat_sample)
+    insights = _summarize_with_llm(client_id, query, schema_mapping, flat_sample, conversation_history)
  
     return {
         "agent": "External Telemetry Scout",

@@ -136,6 +136,7 @@ export default function ForecastCard({ refreshTrigger = 0 }: ForecastCardProps) 
   }, [loading, forecastGap, gaps, refreshTrigger, backendUrl, authToken]);
 
   const riskLevel = forecast?.revenue_risk?.risk_level;
+  // eslint-disable-next-line security/detect-object-injection -- riskLevel is a backend enum value used only to look up a CSS class in a fixed local table, with a safe fallback
   const riskClass = (riskLevel && RISK_COLORS[riskLevel]) || "text-slate-400 bg-slate-500/10";
 
   return (

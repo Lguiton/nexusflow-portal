@@ -31,7 +31,7 @@ class CreateApiKeyRequest(BaseModel):
     label: str = Field("", max_length=200)
 
 
-@router.post("/api/v1/settings/api-keys")
+@router.post("/api/v1/settings/api-keys", tags=["Settings"])
 async def create_api_key(
     req: CreateApiKeyRequest = CreateApiKeyRequest(),
     user: AuthenticatedUser = Depends(require_role("owner", "admin")),
@@ -46,7 +46,7 @@ async def create_api_key(
         raise HTTPException(status_code=502, detail="Unable to create API key right now.")
 
 
-@router.get("/api/v1/settings/api-keys")
+@router.get("/api/v1/settings/api-keys", tags=["Settings"])
 async def list_api_keys(
     user: AuthenticatedUser = Depends(require_role("owner", "admin")),
 ):
@@ -57,7 +57,7 @@ async def list_api_keys(
         raise HTTPException(status_code=502, detail="Unable to load API keys right now.")
 
 
-@router.delete("/api/v1/settings/api-keys/{key_id}")
+@router.delete("/api/v1/settings/api-keys/{key_id}", tags=["Settings"])
 async def revoke_api_key(
     key_id: int,
     user: AuthenticatedUser = Depends(require_role("owner", "admin")),

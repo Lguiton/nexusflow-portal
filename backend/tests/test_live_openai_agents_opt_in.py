@@ -161,3 +161,44 @@ def test_orchestrator_route_query_cfo_briefing_live(seeded_tenant):
     assert result["agent_breakdown"][0]["agent_name"] == "virtual_cfo"
     assert result["status"] == "COMPLETE"
     assert result["confidence_score"] == 1.0
+
+
+def test_orchestrator_route_query_data_engineer_live(seeded_tenant):
+    """Migrated from swarm_test.py's test_lean_intent_routing (root-level,
+    outside pytest.ini's `testpaths = tests`, so it was never actually
+    collected or run by a bare `pytest` invocation despite looking like a
+    maintained test file -- see this repo's SEC-03 SAST cleanup pass, 28
+    Aug 2026). Covers the two data_engineer keyword-routing cases from
+    that original test ("data" and "ingest") that aren't already exercised
+    by this file's other two route_query tests."""
+    from backend.agents import orchestrator
+
+    result_data_keyword = orchestrator.route_query(
+        query="Show me historical ledger data", client_id=seeded_tenant
+    )
+    assert result_data_keyword["agent_breakdown"][0]["agent_name"] == "data_engineer"
+    assert result_data_keyword["status"] == "COMPLETE"
+
+    result_ingest_keyword = orchestrator.route_query(
+        query="Upload and ingest transaction CSV batch", client_id=seeded_tenant
+    )
+    assert result_ingest_keyword["agent_breakdown"][0]["agent_name"] == "data_engineer"
+    assert result_ingest_keyword["status"] == "COMPLETE"
+
+
+def test_orchestrator_route_query_forecast_live(seeded_tenant):
+    """Migrated from swarm_test.py's test_lean_intent_routing -- the
+    predictive_forecaster keyword-routing case ("forecast") that isn't
+    covered by this file's other route_query tests. (The original test's
+    two remaining assertions -- "Give me an executive CFO briefing" and
+    "Run security audit and system health check" -- both fall through to
+    the router's virtual_cfo default and are redundant with
+    test_orchestrator_route_query_cfo_briefing_live above, so they were
+    not migrated.)"""
+    from backend.agents import orchestrator
+
+    result = orchestrator.route_query(
+        query="Forecast ARR for Q3 with confidence intervals", client_id=seeded_tenant
+    )
+    assert result["agent_breakdown"][0]["agent_name"] == "predictive_forecaster"
+    assert result["status"] == "COMPLETE"
