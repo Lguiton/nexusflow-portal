@@ -128,8 +128,29 @@ export function SwarmVisualizer({ data }: { data: CognitiveSearchResponse | null
   if (!data) return null;
 
   const workerAgent = data.agent_breakdown.find(a => a.agent_name !== "Orchestrator Agent #00");
-  
+
   if (!workerAgent) return null;
+
+  // Dashboard punch list, Round 2 (found stale, verified & fixed 2 Sep 2026):
+  // this component only has a genuinely specialized view for 3 of the
+  // swarm's agents -- Analyst #04's data table, Forecaster #07's
+  // confidence-interval chart, Strategist #15's advisory card. Every other
+  // routed agent (Ops Shield #09, External Telemetry Scout #12, Data
+  // Engineer #02, etc.) used to fall through to a permanent-looking
+  // "Awaiting specialized agent rendering..." placeholder -- rendered right
+  // below CognitiveSearchBar's own already-complete synthesized answer for
+  // that exact same result, so it read as a stuck/broken secondary widget
+  // (the punch list's guess: "a stale loading state that isn't clearing")
+  // when the real cause was simpler: there was never anything more for
+  // this component to add for those agents. Render nothing instead of a
+  // placeholder when there's no specialized view -- the answer's already
+  // fully shown above.
+  const hasSpecializedView =
+    workerAgent.agent_name.includes("Agent #04") ||
+    workerAgent.agent_name.includes("Agent #07") ||
+    workerAgent.agent_name.includes("Agent #15");
+
+  if (!hasSpecializedView) return null;
 
   const renderContent = () => {
     if (workerAgent.agent_name.includes("Agent #04")) {
@@ -138,10 +159,7 @@ export function SwarmVisualizer({ data }: { data: CognitiveSearchResponse | null
     if (workerAgent.agent_name.includes("Agent #07")) {
       return <ForecasterChart insight={data.synthesized_insight} artifacts={workerAgent.raw_artifacts} />;
     }
-    if (workerAgent.agent_name.includes("Agent #15")) {
-      return <StrategistCard insight={data.synthesized_insight} />;
-    }
-    return <div className="text-slate-400">Awaiting specialized agent rendering...</div>;
+    return <StrategistCard insight={data.synthesized_insight} />;
   };
 
   const getAgentIcon = () => {
