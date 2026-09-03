@@ -5,7 +5,7 @@ import contextlib
 import glob
 import statistics
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends, Response, Query
@@ -148,8 +148,14 @@ if _mcp_asgi_app is not None:
 # API-03: rate limiting exempts CORS preflight (browsers issue these
 # automatically and cache them; they carry no business risk on their
 # own) and the health-check endpoint (conventionally hit frequently by
-# uptime/monitoring tooling, and not sensitive).
-_RATE_LIMIT_EXEMPT_PATHS = {"/api/v1/health"}
+# uptime/monitoring tooling, and not sensitive). OPS-05 extends this
+# same set to also exempt the new GET /api/v1/status endpoint below,
+# and reuses it as the MAINTENANCE-mode exemption too (see
+# enforce_api_rate_limits) -- both endpoints must stay reachable
+# during a real maintenance window so monitoring can see the real
+# state ("MAINTENANCE", not a bare connection failure indistinguishable
+# from a real outage), and neither carries meaningful abuse risk.
+_RATE_LIMIT_EXEMPT_PATHS = {"/api/v1/health", "/api/v1/status"}
 
 
 @app.middleware("http")
@@ -175,6 +181,29 @@ async def enforce_api_rate_limits(request: Request, call_next):
     """
     if request.method == "OPTIONS" or request.url.path in _RATE_LIMIT_EXEMPT_PATHS:
         return await call_next(request)
+
+    # OPS-05: maintenance mode short-circuits BEFORE any rate-limit
+    # bookkeeping runs -- a client hitting a platform in maintenance
+    # should never burn its own rate-limit budget on responses that
+    # were never going to reach a real endpoint anyway. Checked fresh
+    # on every request (backend/status.py's own docstring), so an
+    # operator flipping the flag mid-run takes effect on the very next
+    # request, no restart required. Same manual JSONResponse-with-
+    # headers construction as the 429 branch below, for the same
+    # reason: this is a middleware, not an endpoint, so Starlette's own
+    # exception->JSON conversion never runs for it, and the response
+    # still needs to flow back out through add_security_headers/CORS.
+    from backend.status import is_maintenance_mode, get_maintenance_status
+    if is_maintenance_mode():
+        info = get_maintenance_status()
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Eivanta is currently undergoing scheduled maintenance. Please try again shortly.",
+                "maintenance": info,
+            },
+            headers={"Retry-After": "300"},
+        )
 
     tenant_id = best_effort_tenant_id_from_authorization_header(
         request.headers.get("authorization")
@@ -289,6 +318,51 @@ async def get_health():
         "docker_detected": os.path.exists("/.dockerenv"),
         "active_agent_modules": active_agents,
         "version": "2.2.1 (Hardened Production Architecture)"
+    }
+
+
+@app.get("/api/v1/status", tags=["Health"])
+async def get_status():
+    """
+    OPS-05: a genuinely CHECKED status, not a hardcoded string. Unlike
+    GET /api/v1/health directly above (confirmed by reading it: it
+    returns "status": "ONLINE" unconditionally, whether or not the
+    database is actually reachable -- a real, disclosed gap this
+    endpoint does not silently fix by changing /api/v1/health's own
+    existing contract, since something may already depend on it always
+    returning 200), this endpoint runs a real database connectivity
+    check on every call and reports real maintenance-mode state.
+
+    Deliberately public/unauthenticated (exempt from rate limiting AND
+    from maintenance mode itself -- see _RATE_LIMIT_EXEMPT_PATHS and
+    enforce_api_rate_limits above) and tenant-agnostic: this reports
+    the PLATFORM's own state, not any one tenant's data, so it carries
+    nothing that needs auth to see -- the same reasoning that already
+    makes GET /api/v1/health public.
+
+    overall_status is one of "operational" (DB reachable, not in
+    maintenance), "maintenance" (maintenance mode active, regardless of
+    DB state -- an operator-declared window takes precedence in the
+    reported status over what the DB check itself would say), or
+    "degraded" (DB unreachable, not in maintenance -- the one state
+    /api/v1/health can never report today).
+    """
+    from backend.status import check_db_reachable, get_maintenance_status
+    maintenance = get_maintenance_status()
+    db_reachable = await check_db_reachable()
+
+    if maintenance["active"]:
+        overall_status = "maintenance"
+    elif db_reachable:
+        overall_status = "operational"
+    else:
+        overall_status = "degraded"
+
+    return {
+        "overall_status": overall_status,
+        "database_reachable": db_reachable,
+        "maintenance": maintenance,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 # FINOPS-01: real billing-overrun protection, not just monitoring. Composes
 # on top of the same real JWT auth every other endpoint already requires,

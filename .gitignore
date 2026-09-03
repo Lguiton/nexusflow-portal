@@ -35,6 +35,12 @@ backend/eivanta_core.db
 # real backup location, never in version control.
 backend/backups/
 
+# OPS-05 (3 Sep 2026): backend/status.py's real, togglable maintenance-mode
+# flag file. Purely an operational runtime toggle an operator creates and
+# removes directly on the host (or via the EIVANTA_MAINTENANCE_MODE env var)
+# -- never source, never intended for version control.
+backend/.maintenance_mode
+
 # Session scratch/cleanup staging directories -- never intended for the
 # repo; the files inside were moved here pending manual deletion by the
 # founder, not to be committed.
