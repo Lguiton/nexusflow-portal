@@ -27,6 +27,14 @@ backend/eivanta_core.db
 # was added. Same live-data reasoning as the block above.
 *.duckdb.wal
 
+# OPS-03 (3 Sep 2026): backend/backup.py's real encrypted backups land
+# here by default (EIVANTA_BACKUP_DIR, defaults to backend/backups/).
+# Same live-data reasoning as the *.duckdb block above -- an encrypted
+# backup is still a full copy of every password hash, refresh-token
+# hash, and tenant's BYOK ciphertext in the platform, and belongs in a
+# real backup location, never in version control.
+backend/backups/
+
 # Session scratch/cleanup staging directories -- never intended for the
 # repo; the files inside were moved here pending manual deletion by the
 # founder, not to be committed.

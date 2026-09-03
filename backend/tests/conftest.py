@@ -61,6 +61,12 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test-placeholder-not-a-real-key")
 # Fernet key, generated once for testing only, never the real deployed
 # key from backend/.env (which this conftest deliberately never reads).
 os.environ.setdefault("BYOK_ENCRYPTION_KEY", "-q952Kq64VhGlNJyBQv_sVaiYf7UHBWX-HRakY7mM1w=")
+# OPS-03: backend/backup.py's own _get_fernet() lazily requires
+# BACKUP_ENCRYPTION_KEY, deliberately a SEPARATE key from
+# BYOK_ENCRYPTION_KEY above (see backup.py's own docstring for why) --
+# same discipline: a real, fixed-for-this-suite Fernet key generated once
+# for testing only, never the real deployed key from backend/.env.
+os.environ.setdefault("BACKUP_ENCRYPTION_KEY", "Q9E2kvmVhbYxFl8gwGxrwcNYgH7kUYzbuuA8LevOBRE=")
 
 import pytest
 
