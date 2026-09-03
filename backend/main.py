@@ -30,6 +30,7 @@ from backend.rate_limit import (
     check_ip_burst_limit,
     check_tenant_daily_quota,
 )
+from backend import rate_limit as _rate_limit_module
 def get_active_agent_count() -> int:
     try:
         agents_dir = os.path.join(os.path.dirname(__file__), 'agents')
@@ -180,9 +181,55 @@ async def enforce_api_rate_limits(request: Request, call_next):
     )
     try:
         if tenant_id:
-            check_tenant_burst_limit(tenant_id)
-            check_tenant_daily_quota(tenant_id)
+            try:
+                check_tenant_burst_limit(tenant_id)
+            except HTTPException:
+                # SEC-02: log the TRIP itself, tenant-scoped -- see the
+                # per-IP branch's comment below for why that one is NOT
+                # logged here. Fire-and-forget import (module-level would
+                # be a circular import: db_manager doesn't import
+                # main/rate_limit, but keeping this import local matches
+                # how this module already imports db_manager lazily
+                # elsewhere, e.g. get_ingestion_history_endpoint above).
+                # Reads the limit/window fresh off the rate_limit module
+                # (not a locally-bound import) so this stays correct
+                # under monkeypatch.setattr(rate_limit, "API_TENANT_..."
+                # , ...) the way test_api03_rate_limits.py already does
+                # -- same "read fresh at call time" discipline
+                # rate_limit.py's own module docstring calls for.
+                from backend.db_manager import log_security_event
+                await log_security_event(
+                    tenant_id, "rate_limit_tenant_burst", "medium",
+                    detail=(
+                        f"Tenant burst limit tripped "
+                        f"({_rate_limit_module.API_TENANT_BURST_LIMIT}/"
+                        f"{_rate_limit_module.API_TENANT_BURST_WINDOW_SECONDS}s)."
+                    ),
+                    source_ip=request.client.host if request.client else None,
+                )
+                raise
+            try:
+                check_tenant_daily_quota(tenant_id)
+            except HTTPException:
+                from backend.db_manager import log_security_event
+                await log_security_event(
+                    tenant_id, "rate_limit_tenant_daily_quota", "medium",
+                    detail=(
+                        f"Tenant daily request quota tripped "
+                        f"({_rate_limit_module.API_TENANT_DAILY_QUOTA}/24h)."
+                    ),
+                    source_ip=request.client.host if request.client else None,
+                )
+                raise
         else:
+            # SEC-02: deliberately NOT logged to security_events -- this
+            # branch has no tenant (unauthenticated traffic: no/invalid
+            # JWT), and security_events is tenant-scoped by design (every
+            # row must have a real client_id so a tenant's own
+            # owner/admin can read their own events back). Logging these
+            # would need a separate, non-tenant-scoped table -- a real,
+            # disclosed gap (see the Master Build List entry for this
+            # item), not an oversight.
             source_ip = request.client.host if request.client else "unknown"
             check_ip_burst_limit(source_ip)
     except HTTPException as exc:
@@ -392,6 +439,42 @@ async def get_ingestion_history_endpoint(
     except Exception as e:
         logger.error(f"Ingestion history fetch error: {e}")
         raise HTTPException(status_code=502, detail="Could not fetch ingestion history. Please try again.")
+
+
+@app.get("/api/v1/security/events", tags=["Security"])
+async def get_security_events_endpoint(
+    limit: int = 20,
+    offset: int = Query(0, ge=0, description="Rows to skip before the first returned row."),
+    event_type: Optional[str] = Query(None, description="Filter to events of this exact type (e.g. 'account_lockout', 'rate_limit_tenant_burst', 'rate_limit_tenant_daily_quota')."),
+    severity: Optional[str] = Query(None, description="Filter to events at this exact severity ('low', 'medium', 'high', 'critical')."),
+    sort: str = Query("desc", description="Sort by time: 'asc' or 'desc' (default, newest first)."),
+    user: AuthenticatedUser = Depends(require_role("owner", "admin")),
+):
+    """
+    SEC-02: real, tenant-scoped read of this tenant's own security_events
+    -- currently account lockouts (AUTH-05) and tenant-scoped rate-limit
+    trips (API-03's tenant burst/daily-quota limits); see
+    backend/db_manager.py's init_db migration comment for what's
+    disclosed as still open. Restricted to owner/admin, same reasoning as
+    every other tenant-wide security/administrative surface in this file
+    (e.g. BYOK key management, budget caps) -- a member/viewer has no
+    business reading a log of THIS TENANT's lockouts and rate-limit
+    trips, even though it's their own tenant's data, not another
+    tenant's.
+    """
+    try:
+        from backend.db_manager import get_security_events, count_security_events
+        rows = await get_security_events(
+            user.client_id, limit=limit, offset=offset,
+            event_type=event_type, severity=severity, sort=sort,
+        )
+        total_count = await count_security_events(user.client_id, event_type=event_type, severity=severity)
+        page = _paginated_envelope(rows, total_count, limit, offset)
+        page["events"] = page.pop("items")
+        return {"client_id": user.client_id, **page}
+    except Exception as e:
+        logger.error(f"Security events fetch error for tenant '{user.client_id}': {e}")
+        raise HTTPException(status_code=502, detail="Could not fetch security events. Please try again.")
 
 
 @app.delete("/api/v1/finance/ledger", tags=["Ledger & Ingestion"])

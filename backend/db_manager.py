@@ -589,6 +589,39 @@ async def init_db():
                 except Exception as e:
                     if "already exists" not in str(e).lower():
                         raise
+
+                # SEC-02 (detection/logging slice): a real, tenant-scoped
+                # audit trail of security-relevant EVENTS that already
+                # happen elsewhere in this codebase but were previously
+                # only ever surfaced as a single HTTP response to the one
+                # caller who tripped them -- an account lockout (AUTH-05)
+                # or a tenant-scoped rate-limit trip (API-03's tenant
+                # burst/daily-quota limits) was visible to that one
+                # request and then gone. This table gives a tenant's
+                # owner/admin a real, queryable record of those trips
+                # (see get_security_events/GET /api/v1/security/events).
+                #
+                # Deliberately NOT every candidate signal this item's
+                # title could cover -- see the Master Build List entry
+                # for this item for what's disclosed as still open
+                # (credential rotation; cross-tenant 404 probe attempts;
+                # the per-source-IP burst limit, which has no tenant to
+                # attribute an event to and is intentionally excluded
+                # here). No hash-chain tamper-evidence (unlike
+                # ai_lineage_log) -- a real, disclosed simplification for
+                # this slice, not an oversight.
+                conn.execute("CREATE SEQUENCE IF NOT EXISTS security_event_id_seq")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS security_events (
+                        id BIGINT DEFAULT nextval('security_event_id_seq'),
+                        client_id VARCHAR NOT NULL,
+                        event_type VARCHAR NOT NULL,
+                        severity VARCHAR NOT NULL,
+                        detail VARCHAR,
+                        source_ip VARCHAR,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
             finally:
                 conn.close()
     await asyncio.to_thread(_init)
@@ -3729,6 +3762,148 @@ async def count_ingestion_history(client_id: str, status: Optional[str] = None) 
                 return int(row[0]) if row else 0
             except Exception as e:
                 logger.error(f"Failed to count ingestion history for tenant '{client_id}': {e}")
+                return 0
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_count)
+
+
+# ---------------------------------------------------------------------------
+# SEC-02: security-event detection/logging. See the migration comment above
+# (init_db) for what this table does and does NOT cover.
+
+_VALID_SECURITY_SEVERITIES = {"low", "medium", "high", "critical"}
+
+
+async def log_security_event(
+    client_id: str, event_type: str, severity: str,
+    detail: Optional[str] = None, source_ip: Optional[str] = None,
+) -> None:
+    """
+    Records one row to security_events. Deliberately FAIL-OPEN, same
+    discipline as store_idempotent_response above: this is called from
+    the middle of a real request that is about to return a 429 (a
+    rate-limit trip) or already has (an account lockout) -- a failure to
+    WRITE the audit record must never itself raise, mask, or delay the
+    real response the caller is waiting on. Any failure is logged and
+    swallowed; the caller never even awaits a return value.
+
+    Silently no-ops (no exception, no log spam) if client_id or
+    event_type is falsy, or severity isn't one of
+    _VALID_SECURITY_SEVERITIES -- a call-site typo should never be able
+    to either crash a real request or corrupt the audit table with junk
+    rows a reader can't make sense of.
+    """
+    if not client_id or not event_type or severity not in _VALID_SECURITY_SEVERITIES:
+        logger.error(
+            f"log_security_event: invalid call (client_id={client_id!r}, "
+            f"event_type={event_type!r}, severity={severity!r}) -- not recorded."
+        )
+        return
+    lock = get_db_lock()
+
+    def _write():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "INSERT INTO security_events (client_id, event_type, severity, detail, source_ip) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [client_id, event_type, severity, detail, source_ip],
+                )
+            except Exception as e:
+                logger.error(f"Failed to record security event ({event_type}) for tenant '{client_id}': {e}")
+            finally:
+                conn.close()
+    await asyncio.to_thread(_write)
+
+
+async def get_security_events(
+    client_id: str, limit: int = 20, offset: int = 0,
+    event_type: Optional[str] = None, severity: Optional[str] = None, sort: str = "desc",
+) -> list:
+    """Tenant-scoped, paginated/filterable read of security_events -- same
+    shape/discipline as get_ingestion_history above (real offset, optional
+    filters, sort direction; see count_security_events for the matching
+    total-count query)."""
+    if not client_id:
+        raise ValueError("client_id is required.")
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset or 0))
+    sort_sql = "ASC" if str(sort).strip().lower() == "asc" else "DESC"
+    lock = get_db_lock()
+
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+                if "security_events" not in tables:
+                    return []
+                params = [client_id]
+                where_extra = ""
+                if event_type:
+                    where_extra += " AND event_type = ?"
+                    params.append(event_type)
+                if severity:
+                    where_extra += " AND severity = ?"
+                    params.append(severity)
+                params.extend([limit, offset])
+                rows = conn.execute(f"""
+                    SELECT id, event_type, severity, detail, source_ip, created_at
+                    FROM security_events
+                    WHERE client_id = ?{where_extra}
+                    ORDER BY created_at {sort_sql}, id {sort_sql}
+                    LIMIT ? OFFSET ?
+                """, params).fetchall()
+                return [
+                    {
+                        "id": r[0],
+                        "event_type": r[1],
+                        "severity": r[2],
+                        "detail": r[3],
+                        "source_ip": r[4],
+                        "created_at": str(r[5]),
+                    }
+                    for r in rows
+                ]
+            except Exception as e:
+                logger.error(f"Failed to fetch security events for tenant '{client_id}': {e}")
+                return []
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
+async def count_security_events(
+    client_id: str, event_type: Optional[str] = None, severity: Optional[str] = None,
+) -> int:
+    """Real COUNT(*) matching get_security_events' own WHERE clause."""
+    if not client_id:
+        return 0
+    lock = get_db_lock()
+
+    def _count():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+                if "security_events" not in tables:
+                    return 0
+                params = [client_id]
+                where_extra = ""
+                if event_type:
+                    where_extra += " AND event_type = ?"
+                    params.append(event_type)
+                if severity:
+                    where_extra += " AND severity = ?"
+                    params.append(severity)
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM security_events WHERE client_id = ?{where_extra}", params
+                ).fetchone()
+                return int(row[0]) if row else 0
+            except Exception as e:
+                logger.error(f"Failed to count security events for tenant '{client_id}': {e}")
                 return 0
             finally:
                 conn.close()

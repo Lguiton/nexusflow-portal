@@ -485,6 +485,17 @@ async def login(req: LoginRequest, request: Request):
                 user["user_id"], MAX_FAILED_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_MINUTES
             )
             if result["locked"]:
+                # SEC-02: log the LOCKOUT trip itself (not every wrong
+                # password) -- same "log on threshold crossed" discipline
+                # as the rate-limit trips logged in main.py's
+                # enforce_api_rate_limits. Fire-and-forget: a logging
+                # failure must never block the 429 the caller is about
+                # to get regardless.
+                await db_manager.log_security_event(
+                    user["client_id"], "account_lockout", "high",
+                    detail=f"Account locked after {MAX_FAILED_LOGIN_ATTEMPTS} failed login attempts.",
+                    source_ip=request.client.host if request.client else None,
+                )
                 raise HTTPException(
                     status_code=429,
                     detail=f"Too many failed login attempts. Try again in about {LOGIN_LOCKOUT_MINUTES} minutes.",
@@ -549,6 +560,16 @@ async def mfa_verify(
     if not await _verify_totp_or_backup_code(user["user_id"], req.code):
         result = await db_manager.record_failed_login(user["user_id"], MAX_FAILED_LOGIN_ATTEMPTS, LOGIN_LOCKOUT_MINUTES)
         if result["locked"]:
+            # SEC-02: same lockout-trip event as login() above -- an
+            # MFA-stage lockout is just as real a signal (someone who
+            # already had a correct password is now failing the second
+            # factor repeatedly) and reuses the identical event_type so a
+            # reader doesn't need to know which endpoint tripped it.
+            await db_manager.log_security_event(
+                user["client_id"], "account_lockout", "high",
+                detail=f"Account locked after {MAX_FAILED_LOGIN_ATTEMPTS} failed MFA verification attempts.",
+                source_ip=request.client.host if request.client else None,
+            )
             raise HTTPException(
                 status_code=429,
                 detail=f"Too many failed attempts. Try again in about {LOGIN_LOCKOUT_MINUTES} minutes.",
