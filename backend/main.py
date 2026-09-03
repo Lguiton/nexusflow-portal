@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 from backend.db_manager import ingest_csv_to_db, init_telemetry_schema
+from backend.pagination import envelope as _paginated_envelope
 from backend.auth import (
     verify_jwt_and_get_client_id,
     verify_jwt_and_get_user,
@@ -370,14 +371,24 @@ async def upload_ledger(
 @app.get("/api/v1/data/ingestion-history", tags=["Ledger & Ingestion"])
 async def get_ingestion_history_endpoint(
     limit: int = 20,
+    offset: int = Query(0, ge=0, description="Rows to skip before the first returned row."),
+    status: Optional[str] = Query(None, description="Filter to rows with this exact status (e.g. 'SUCCESS', 'REJECTED')."),
+    sort: str = Query("desc", description="Sort by timestamp: 'asc' or 'desc' (default)."),
     client_id: str = Depends(verify_jwt_and_get_client_id),
 ):
     # DATA-08: tenant-scoped ingestion history -- status/errors per past
     # upload attempt, not just the current state of the ledgers table.
+    # API-02: real pagination (offset, not just limit), filtering
+    # (status), and sorting -- history/total_count/limit/offset/has_more
+    # ADDITIVE to the pre-existing "history" key and client_id/limit
+    # default behavior, so no existing caller of this endpoint breaks.
     try:
-        from backend.db_manager import get_ingestion_history
-        history = await get_ingestion_history(client_id, limit=limit)
-        return {"client_id": client_id, "history": history}
+        from backend.db_manager import get_ingestion_history, count_ingestion_history
+        rows = await get_ingestion_history(client_id, limit=limit, offset=offset, status=status, sort=sort)
+        total_count = await count_ingestion_history(client_id, status=status)
+        page = _paginated_envelope(rows, total_count, limit, offset)
+        page["history"] = page.pop("items")
+        return {"client_id": client_id, **page}
     except Exception as e:
         logger.error(f"Ingestion history fetch error: {e}")
         raise HTTPException(status_code=502, detail="Could not fetch ingestion history. Please try again.")
@@ -658,12 +669,26 @@ async def delete_budget_cap(user: AuthenticatedUser = Depends(require_role("owne
 # ---------------------------------------------------------------------------
 
 @app.get("/api/v1/audit/lineage", tags=["Audit & Compliance"])
-async def get_audit_lineage(limit: int = 100, client_id: str = Depends(verify_jwt_and_get_client_id)):
+async def get_audit_lineage(
+    limit: int = 100,
+    offset: int = Query(0, ge=0, description="Rows to skip before the first returned row."),
+    agent_name: Optional[str] = Query(None, description="Filter to entries logged by this exact agent."),
+    sort: str = Query("desc", description="Sort by lineage_id: 'asc' or 'desc' (default)."),
+    client_id: str = Depends(verify_jwt_and_get_client_id),
+):
+    # API-02: real pagination/filtering/sorting -- entries/total_count/
+    # limit/offset/has_more ADDITIVE to the pre-existing "entries" key, so
+    # no existing caller of this endpoint breaks. integrity is unaffected
+    # by paging -- verify_lineage_chain always checks the tenant's FULL
+    # chain, never just the page being viewed.
     try:
-        from backend.db_manager import get_lineage_log, verify_lineage_chain
-        entries = await get_lineage_log(client_id, limit)
+        from backend.db_manager import get_lineage_log, count_lineage_log, verify_lineage_chain
+        rows = await get_lineage_log(client_id, limit=limit, offset=offset, agent_name=agent_name, sort=sort)
+        total_count = await count_lineage_log(client_id, agent_name=agent_name)
         integrity = await verify_lineage_chain(client_id)
-        return {"entries": entries, "integrity": integrity}
+        page = _paginated_envelope(rows, total_count, limit, offset)
+        page["entries"] = page.pop("items")
+        return {"integrity": integrity, **page}
     except Exception as e:
         logger.error(f"Audit lineage fetch error: {e}")
         raise HTTPException(status_code=502, detail="Could not fetch the audit lineage log.")
@@ -873,6 +898,9 @@ async def export_stakeholder_report(
 @app.get("/api/v1/reports/export-history", tags=["Reports"])
 async def get_report_export_history_endpoint(
     limit: int = 50,
+    offset: int = Query(0, ge=0, description="Rows to skip before the first returned row."),
+    export_format: Optional[str] = Query(None, description="Filter to exports in this exact format (e.g. 'pdf', 'csv')."),
+    sort: str = Query("desc", description="Sort by timestamp: 'asc' or 'desc' (default)."),
     user: AuthenticatedUser = Depends(require_role("owner", "admin")),
 ):
     # REP-02: read side of the export audit trail. Owner/admin-only --
@@ -880,9 +908,17 @@ async def get_report_export_history_endpoint(
     # can download their own copy of the report), seeing WHO on the team
     # downloaded it is scoped the same way other cross-member visibility
     # already is elsewhere (e.g. the platform metrics endpoints).
-    from backend.db_manager import get_report_export_history
-    history = await get_report_export_history(user.client_id, limit)
-    return {"exports": history}
+    # API-02: real pagination/filtering/sorting -- exports/total_count/
+    # limit/offset/has_more ADDITIVE to the pre-existing "exports" key, so
+    # no existing caller of this endpoint breaks.
+    from backend.db_manager import get_report_export_history, count_report_export_history
+    rows = await get_report_export_history(
+        user.client_id, limit=limit, offset=offset, export_format=export_format, sort=sort
+    )
+    total_count = await count_report_export_history(user.client_id, export_format=export_format)
+    page = _paginated_envelope(rows, total_count, limit, offset)
+    page["exports"] = page.pop("items")
+    return page
 
 
 class TelemetryScoutRequest(BaseModel):

@@ -557,6 +557,38 @@ async def init_db():
                     except Exception as e:
                         if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
                             raise
+
+                # API-02 (idempotency semantics): stores one row per
+                # (client_id, endpoint, idempotency_key) a caller has ever
+                # used, so a retried request can be recognized and
+                # replayed instead of re-executed. Same idempotent
+                # CREATE-IF-NOT-EXISTS + UNIQUE-INDEX shape as api_keys'
+                # own migration above. response_body is stored as a JSON
+                # string (DuckDB has no native JSON column type here,
+                # same choice this file already made elsewhere) --
+                # get_idempotent_response below is the only reader and
+                # always json.loads's it back.
+                conn.execute("CREATE SEQUENCE IF NOT EXISTS idempotency_key_id_seq")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS idempotency_keys (
+                        id BIGINT DEFAULT nextval('idempotency_key_id_seq'),
+                        client_id VARCHAR NOT NULL,
+                        endpoint VARCHAR NOT NULL,
+                        idempotency_key VARCHAR NOT NULL,
+                        request_hash VARCHAR NOT NULL,
+                        response_status INTEGER NOT NULL,
+                        response_body VARCHAR NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                try:
+                    conn.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idempotency_keys_unique "
+                        "ON idempotency_keys(client_id, endpoint, idempotency_key)"
+                    )
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        raise
             finally:
                 conn.close()
     await asyncio.to_thread(_init)
@@ -1929,6 +1961,81 @@ async def check_user_quota_gate(client_id: str) -> dict:
 
 
 # ==============================================================================
+# API-02 (idempotency semantics): storage for backend/idempotency.py's
+# real Idempotency-Key mechanism. One row per (client_id, endpoint,
+# idempotency_key) a caller has ever used -- see that module's own
+# docstring for the full contract (opt-in, scoped, 422 on key reuse with
+# a different body). This half is deliberately pure storage: it doesn't
+# know what "replay" or "store" mean as a request-lifecycle concept, the
+# same separation TEN-04's quota gate keeps between "compute the real
+# numbers" (here) and "decide what to do about them" (the router).
+# ==============================================================================
+
+async def get_idempotent_response(client_id: str, endpoint: str, idempotency_key: str) -> Optional[dict]:
+    """None if this (client_id, endpoint, idempotency_key) has never been
+    seen before -- the caller should proceed with real work. Otherwise
+    the stored request_hash (for the caller to compare against the
+    CURRENT request's own hash) plus the exact response to replay if
+    they match."""
+    await init_db()
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT request_hash, response_status, response_body FROM idempotency_keys "
+                    "WHERE client_id = ? AND endpoint = ? AND idempotency_key = ?",
+                    [client_id, endpoint, idempotency_key],
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "request_hash": row[0],
+                    "response_status": row[1],
+                    "response_body": json.loads(row[2]),
+                }
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def store_idempotent_response(
+    client_id: str, endpoint: str, idempotency_key: str, request_hash: str,
+    response_status: int, response_body: dict,
+) -> None:
+    await init_db()
+    lock = get_db_lock()
+    body_json = json.dumps(response_body)
+
+    def _insert():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "INSERT INTO idempotency_keys "
+                    "(client_id, endpoint, idempotency_key, request_hash, response_status, response_body) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [client_id, endpoint, idempotency_key, request_hash, response_status, body_json],
+                )
+            except Exception as e:
+                # idempotency_keys_unique can legitimately fire here on a
+                # genuine race: two concurrent requests carrying the same
+                # brand-new key both missed get_idempotent_response above
+                # (neither had been stored yet) and both tried to insert.
+                # The loser's insert failing is fine -- an equivalent
+                # (client_id, endpoint, idempotency_key) row already
+                # exists either way, which is exactly what should be true
+                # after this call regardless of which request "won".
+                if "constraint" not in str(e).lower() and "unique" not in str(e).lower():
+                    raise
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_insert)
+
+
+# ==============================================================================
 # ENT-03: explainable-AI audit/lineage log. query_audit (SQL-03, above)
 # already records BI Engineer's own NL-to-SQL requests specifically; this
 # is the platform-wide counterpart the backlog calls for -- one entry per
@@ -2039,11 +2146,27 @@ def log_lineage_entry_sync(
         logger.error(f"Sync lineage logging failed for agent '{agent_name}': {e}")
 
 
-async def get_lineage_log(client_id: str, limit: int = 100) -> list:
-    """Tenant-scoped read, most recent first."""
+async def get_lineage_log(
+    client_id: str, limit: int = 100, offset: int = 0, agent_name: Optional[str] = None, sort: str = "desc",
+) -> list:
+    """
+    Tenant-scoped read, most recent first by default.
+
+    API-02: extended with real offset, an optional agent_name filter, and
+    a sort direction -- ordered by lineage_id (the hash-chain's own
+    sequence column, safe to page over since new rows only ever append)
+    rather than timestamp, avoiding any ambiguity from two rows sharing a
+    timestamp. See count_lineage_log below for the matching total-count
+    query. Ordering by lineage_id here is a READ choice only -- it has no
+    bearing on verify_lineage_chain's own integrity check, which walks
+    the chain by lineage_id regardless of how a caller of THIS function
+    asked to view it.
+    """
     if not client_id:
         return []
     limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset or 0))
+    sort_sql = "ASC" if str(sort).strip().lower() == "asc" else "DESC"
     lock = get_db_lock()
 
     def _query():
@@ -2053,14 +2176,20 @@ async def get_lineage_log(client_id: str, limit: int = 100) -> list:
                 tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
                 if "ai_lineage_log" not in tables:
                     return []
-                rows = conn.execute("""
+                params = [client_id]
+                where_agent = ""
+                if agent_name:
+                    where_agent = " AND agent_name = ?"
+                    params.append(agent_name)
+                params.extend([limit, offset])
+                rows = conn.execute(f"""
                     SELECT lineage_id, timestamp, session_id, agent_name, model_used,
                            query_text, decision_summary, status, prev_hash, row_hash
                     FROM ai_lineage_log
-                    WHERE client_id = ?
-                    ORDER BY lineage_id DESC
-                    LIMIT ?
-                """, [client_id, limit]).fetchall()
+                    WHERE client_id = ?{where_agent}
+                    ORDER BY lineage_id {sort_sql}
+                    LIMIT ? OFFSET ?
+                """, params).fetchall()
                 return [
                     {
                         "lineage_id": r[0], "timestamp": str(r[1]), "session_id": r[2],
@@ -2075,6 +2204,36 @@ async def get_lineage_log(client_id: str, limit: int = 100) -> list:
             finally:
                 conn.close()
     return await asyncio.to_thread(_query)
+
+
+async def count_lineage_log(client_id: str, agent_name: Optional[str] = None) -> int:
+    """Real COUNT(*) matching get_lineage_log's own WHERE clause."""
+    if not client_id:
+        return 0
+    lock = get_db_lock()
+
+    def _count():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+                if "ai_lineage_log" not in tables:
+                    return 0
+                params = [client_id]
+                where_agent = ""
+                if agent_name:
+                    where_agent = " AND agent_name = ?"
+                    params.append(agent_name)
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM ai_lineage_log WHERE client_id = ?{where_agent}", params
+                ).fetchone()
+                return int(row[0]) if row else 0
+            except Exception as e:
+                logger.error(f"Failed to count lineage log for tenant '{client_id}': {e}")
+                return 0
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_count)
 
 
 async def verify_lineage_chain(client_id: str) -> dict:
@@ -3351,14 +3510,24 @@ async def log_report_export(
     await asyncio.to_thread(_log)
 
 
-async def get_report_export_history(client_id: str, limit: int = 50) -> list:
+async def get_report_export_history(
+    client_id: str, limit: int = 50, offset: int = 0, export_format: Optional[str] = None, sort: str = "desc",
+) -> list:
     """
     REP-02: read side of the export audit trail -- lets a tenant (owner/
     admin, gated at the router) see who exported what, when. Returns []
     if the table doesn't exist yet for this tenant's database (no export
     has ever happened), same "no fabricated error on an empty/missing
     table" posture as _rows_to_dicts uses for tenant export/deletion.
+
+    API-02: extended with real offset, an optional export_format filter
+    (e.g. 'pdf'/'csv' -- whatever real values this tenant's own rows
+    contain), and a sort direction. See count_report_export_history below
+    for the matching total-count query.
     """
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset or 0))
+    sort_sql = "ASC" if str(sort).strip().lower() == "asc" else "DESC"
     lock = get_db_lock()
     def _query():
         with lock:
@@ -3367,10 +3536,17 @@ async def get_report_export_history(client_id: str, limit: int = 50) -> list:
                 existing = _existing_tables(conn)
                 if "report_export_audit" not in existing:
                     return []
+                params = [client_id]
+                where_format = ""
+                if export_format:
+                    where_format = " AND export_format = ?"
+                    params.append(export_format)
+                params.extend([limit, offset])
                 rows = conn.execute(
-                    "SELECT audit_id, timestamp, user_id, report_type, export_format, status "
-                    "FROM report_export_audit WHERE client_id = ? ORDER BY timestamp DESC LIMIT ?",
-                    [client_id, limit]
+                    f"SELECT audit_id, timestamp, user_id, report_type, export_format, status "
+                    f"FROM report_export_audit WHERE client_id = ?{where_format} "
+                    f"ORDER BY timestamp {sort_sql} LIMIT ? OFFSET ?",
+                    params
                 ).fetchall()
                 return [
                     {
@@ -3386,6 +3562,30 @@ async def get_report_export_history(client_id: str, limit: int = 50) -> list:
             finally:
                 conn.close()
     return await asyncio.to_thread(_query)
+
+
+async def count_report_export_history(client_id: str, export_format: Optional[str] = None) -> int:
+    """Real COUNT(*) matching get_report_export_history's own WHERE clause."""
+    lock = get_db_lock()
+    def _count():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                existing = _existing_tables(conn)
+                if "report_export_audit" not in existing:
+                    return 0
+                params = [client_id]
+                where_format = ""
+                if export_format:
+                    where_format = " AND export_format = ?"
+                    params.append(export_format)
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM report_export_audit WHERE client_id = ?{where_format}", params
+                ).fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_count)
 
 
 async def log_ingestion_attempt(
@@ -3441,11 +3641,28 @@ async def log_ingestion_attempt(
     await asyncio.to_thread(_log)
 
 
-async def get_ingestion_history(client_id: str, limit: int = 20) -> list:
-    """DATA-08: tenant-scoped ingestion history for a history/status UI."""
+async def get_ingestion_history(
+    client_id: str, limit: int = 20, offset: int = 0, status: Optional[str] = None, sort: str = "desc",
+) -> list:
+    """
+    DATA-08: tenant-scoped ingestion history for a history/status UI.
+
+    API-02: extended with real offset (page past the first `limit` rows,
+    not just see the newest ones), an optional status filter (e.g.
+    'SUCCESS'/'REJECTED' -- whatever real values this tenant's own rows
+    actually contain, not a hardcoded enum, so a status this codebase
+    adds later works here with no change), and a sort direction over the
+    same timestamp column the query already ordered by. See
+    count_ingestion_history below for the matching total-count query
+    (kept separate rather than folded into this function's return shape,
+    so existing callers of THIS function -- e.g.
+    test_db_manager_queries.py -- keep getting a plain list back).
+    """
     if not client_id:
         raise ValueError("client_id is required.")
     limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset or 0))
+    sort_sql = "ASC" if str(sort).strip().lower() == "asc" else "DESC"
     lock = get_db_lock()
     def _query():
         with lock:
@@ -3454,13 +3671,19 @@ async def get_ingestion_history(client_id: str, limit: int = 20) -> list:
                 tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
                 if "ingestion_history" not in tables:
                     return []
-                rows = conn.execute("""
+                params = [client_id]
+                where_status = ""
+                if status:
+                    where_status = " AND status = ?"
+                    params.append(status)
+                params.extend([limit, offset])
+                rows = conn.execute(f"""
                     SELECT timestamp, filename, status, rows_ingested, rows_skipped, detail
                     FROM ingestion_history
-                    WHERE client_id = ?
-                    ORDER BY timestamp DESC
-                    LIMIT ?
-                """, [client_id, limit]).fetchall()
+                    WHERE client_id = ?{where_status}
+                    ORDER BY timestamp {sort_sql}
+                    LIMIT ? OFFSET ?
+                """, params).fetchall()
                 return [
                     {
                         "timestamp": str(r[0]),
@@ -3478,6 +3701,38 @@ async def get_ingestion_history(client_id: str, limit: int = 20) -> list:
             finally:
                 conn.close()
     return await asyncio.to_thread(_query)
+
+
+async def count_ingestion_history(client_id: str, status: Optional[str] = None) -> int:
+    """Real COUNT(*) matching get_ingestion_history's own WHERE clause
+    (same client_id + optional status filter), so total_count in the
+    paginated response envelope always reflects the SAME filtered set
+    the page of rows was drawn from."""
+    if not client_id:
+        return 0
+    lock = get_db_lock()
+    def _count():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+                if "ingestion_history" not in tables:
+                    return 0
+                params = [client_id]
+                where_status = ""
+                if status:
+                    where_status = " AND status = ?"
+                    params.append(status)
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM ingestion_history WHERE client_id = ?{where_status}", params
+                ).fetchone()
+                return int(row[0]) if row else 0
+            except Exception as e:
+                logger.error(f"Failed to count ingestion history for tenant '{client_id}': {e}")
+                return 0
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_count)
 
 
 # ==============================================================================

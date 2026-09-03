@@ -13,15 +13,17 @@ loses the response has no way to recover the key; they generate a new one
 and revoke the old one from this same router's DELETE endpoint.
 """
 import logging
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field
 
 try:
     from backend import db_manager
     from backend.auth import require_role, AuthenticatedUser
+    from backend import idempotency
 except ImportError:
     import db_manager
     from auth import require_role, AuthenticatedUser
+    import idempotency
 
 router = APIRouter()
 logger = logging.getLogger("eivanta.api_keys")
@@ -33,17 +35,37 @@ class CreateApiKeyRequest(BaseModel):
 
 @router.post("/api/v1/settings/api-keys", tags=["Settings"])
 async def create_api_key(
+    request: Request,
     req: CreateApiKeyRequest = CreateApiKeyRequest(),
     user: AuthenticatedUser = Depends(require_role("owner", "admin")),
 ):
+    # API-02: opt-in idempotency. Unlike invite_teammate, this endpoint
+    # has NO natural duplicate guard at all -- two labels can be
+    # identical, so a network retry with no Idempotency-Key header would
+    # silently mint a second real key today. A replayed request returns
+    # the exact original response, including its one-time raw api_key --
+    # correct: the client never actually received it the first time, so
+    # handing it back again on a genuine replay is the whole point, not a
+    # leak (the request is authenticated as the same tenant either way).
+    idempotency_body = {"label": req.label}
+    replay = await idempotency.replay_or_none(
+        user.client_id, "POST /api/v1/settings/api-keys", request, idempotency_body
+    )
+    if replay is not None:
+        return replay
+
     try:
         result = await db_manager.generate_api_key(
             user.client_id, req.label, created_by_user_id=user.user_id,
         )
-        return result
     except Exception as e:
         logger.error(f"Failed to create API key for tenant '{user.client_id}': {e}")
         raise HTTPException(status_code=502, detail="Unable to create API key right now.")
+
+    await idempotency.store(
+        user.client_id, "POST /api/v1/settings/api-keys", request, idempotency_body, 200, result
+    )
+    return result
 
 
 @router.get("/api/v1/settings/api-keys", tags=["Settings"])

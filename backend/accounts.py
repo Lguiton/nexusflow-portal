@@ -42,6 +42,7 @@ try:
         sanitize_client_id,
     )
     from backend.byok import encrypt_secret, decrypt_secret
+    from backend import idempotency
 except ImportError:
     from backend import db_manager  # type: ignore
     from auth import (  # type: ignore
@@ -59,6 +60,7 @@ except ImportError:
         sanitize_client_id,
     )
     from byok import encrypt_secret, decrypt_secret  # type: ignore
+    import idempotency  # type: ignore
 
 router = APIRouter()
 logger = logging.getLogger("eivanta.accounts")
@@ -934,8 +936,23 @@ async def list_team(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
 @router.post("/api/v1/team/invite", tags=["Tenant & Team"])
 async def invite_teammate(
     req: InviteRequest,
+    request: Request,
     user: AuthenticatedUser = Depends(require_role("owner", "admin")),
 ):
+    # API-02: opt-in idempotency, checked FIRST -- ahead of the quota gate
+    # and create_invited_user's own duplicate-email check -- so a client
+    # retry (same Idempotency-Key, same body) after a dropped response
+    # replays the ORIGINAL successful result rather than hitting a
+    # spurious "quota reached" or "email already exists" for what was
+    # actually a successful first attempt. No Idempotency-Key header ->
+    # replay_or_none returns None immediately, zero behavior change.
+    idempotency_body = {"email": req.email, "role": req.role}
+    replay = await idempotency.replay_or_none(
+        user.client_id, "POST /api/v1/team/invite", request, idempotency_body
+    )
+    if replay is not None:
+        return replay
+
     # TEN-04: real team-size quota gate, checked BEFORE the new user is
     # created (create_invited_user itself only enforces data-integrity
     # rules that don't depend on who's asking or how many teammates
@@ -974,7 +991,12 @@ async def invite_teammate(
     # lands (see the Phase 6+ report's next-stage task), this should email
     # the invited teammate directly instead and stop returning it here --
     # tracked, not silently forgotten.
-    return {**invited, "temp_password": temp_password}
+    result = {**invited, "temp_password": temp_password}
+    # Only a genuine success is ever stored as replayable -- a transient
+    # 502/500 above returns before reaching here, so a real retry after an
+    # error tries again for real rather than replaying the same failure.
+    await idempotency.store(user.client_id, "POST /api/v1/team/invite", request, idempotency_body, 200, result)
+    return result
 
 
 @router.patch("/api/v1/team/users/{target_user_id}/role", tags=["Tenant & Team"])
