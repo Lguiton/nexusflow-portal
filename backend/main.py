@@ -10,13 +10,25 @@ from pathlib import Path
 from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 from backend.db_manager import ingest_csv_to_db, init_telemetry_schema
-from backend.auth import verify_jwt_and_get_client_id, verify_jwt_and_get_user, require_role, AuthenticatedUser
-from backend.rate_limit import check_ingestion_rate_limit
+from backend.auth import (
+    verify_jwt_and_get_client_id,
+    verify_jwt_and_get_user,
+    require_role,
+    AuthenticatedUser,
+    best_effort_tenant_id_from_authorization_header,
+)
+from backend.rate_limit import (
+    check_ingestion_rate_limit,
+    check_tenant_burst_limit,
+    check_ip_burst_limit,
+    check_tenant_daily_quota,
+)
 def get_active_agent_count() -> int:
     try:
         agents_dir = os.path.join(os.path.dirname(__file__), 'agents')
@@ -131,6 +143,71 @@ if _mcp_asgi_app is not None:
         app.mount("/mcp", _mcp_asgi_app)
     except Exception as e:
         logger.error(f"Failed to mount MCP tool server at /mcp: {e}")
+# API-03: rate limiting exempts CORS preflight (browsers issue these
+# automatically and cache them; they carry no business risk on their
+# own) and the health-check endpoint (conventionally hit frequently by
+# uptime/monitoring tooling, and not sensitive).
+_RATE_LIMIT_EXEMPT_PATHS = {"/api/v1/health"}
+
+
+@app.middleware("http")
+async def enforce_api_rate_limits(request: Request, call_next):
+    """
+    API-03: see backend/rate_limit.py's module-level docstring for the
+    full design (per-tenant burst, per-IP burst, per-tenant daily quota).
+
+    Registration order matters here and is deliberate: this middleware is
+    added FIRST (below), add_security_headers SECOND, and CORSMiddleware
+    LAST -- per Starlette's own add_middleware (last-added = outermost),
+    that makes CORSMiddleware the outermost layer and this one the
+    innermost of the three. So when this short-circuits with a 429
+    (skipping call_next entirely), that response still flows back OUT
+    through both add_security_headers (still stamps its defense-in-depth
+    headers on a 429, not just a 200) and CORSMiddleware (still adds the
+    real browser Origin's CORS headers to a 429 -- without that, a
+    legitimate frontend's fetch() call would see an opaque CORS failure
+    instead of a readable 429 status/body). Moving CORSMiddleware's own
+    registration below this file used to register it first/innermost;
+    only ITS POSITION in the stack changed here, not any of its
+    allow_origins/allow_methods/allow_headers configuration.
+    """
+    if request.method == "OPTIONS" or request.url.path in _RATE_LIMIT_EXEMPT_PATHS:
+        return await call_next(request)
+
+    tenant_id = best_effort_tenant_id_from_authorization_header(
+        request.headers.get("authorization")
+    )
+    try:
+        if tenant_id:
+            check_tenant_burst_limit(tenant_id)
+            check_tenant_daily_quota(tenant_id)
+        else:
+            source_ip = request.client.host if request.client else "unknown"
+            check_ip_burst_limit(source_ip)
+    except HTTPException as exc:
+        # Raised from inside a middleware, not an endpoint -- Starlette's
+        # ExceptionMiddleware (which normally converts a raised
+        # HTTPException into this exact JSON shape) sits INNER to every
+        # user_middleware, so it never sees an exception raised out here.
+        # Must build the response by hand, headers included (Retry-After
+        # matters -- a client parsing it is how it knows when to retry).
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=exc.headers or {},
+        )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
+    return response
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:8001", "http://127.0.0.1:8001"],
@@ -141,15 +218,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
-    return response
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
     session_id: Optional[str] = None

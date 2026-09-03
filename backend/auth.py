@@ -353,3 +353,34 @@ def verify_ws_token(token: Optional[str]) -> Optional[str]:
     if not raw_client_id:
         return None
     return sanitize_client_id(str(raw_client_id))
+
+
+def best_effort_tenant_id_from_authorization_header(
+    authorization: Optional[str],
+) -> Optional[str]:
+    """
+    API-03: lightweight, side-effect-free JWT decode used ONLY to pick a
+    rate-limiting bucket key in main.py's enforce_api_rate_limits
+    middleware -- this is NOT a real auth check and must never be used to
+    authorize anything. Deliberately more lenient than every real auth
+    dependency above: it does not raise on failure (returns None
+    instead), does not enforce tenant suspension, and does not reject an
+    MFA challenge token's client_id the way _decode_and_build_user does --
+    any request carrying ANY validly-signed token, even one a real
+    endpoint would go on to reject for a different reason, still
+    identifies a real tenant worth rate-limiting BY that tenant rather
+    than falling back to the tighter, shared-across-everyone-unauthenticated
+    IP bucket. Returning None here only ever makes the CALLER's behavior
+    MORE restrictive (IP-based instead of tenant-based), never less -- so
+    the leniency here is not a security bypass.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    payload = _decode(token)
+    if not payload:
+        return None
+    raw_client_id = payload.get("client_id") or payload.get("tenant_id") or payload.get("sub")
+    if not raw_client_id:
+        return None
+    return sanitize_client_id(str(raw_client_id))

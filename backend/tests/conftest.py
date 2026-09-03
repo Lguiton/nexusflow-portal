@@ -34,6 +34,14 @@ Design choices worth calling out:
   check. See make_auth_headers's own docstring for why this calls those
   functions directly instead of going through the real HTTP
   /api/v1/auth/signup endpoint.
+
+- API-03's rate limiting/tenant-quota middleware (main.py's
+  enforce_api_rate_limits) runs for EVERY request through the `client`
+  fixture, in every test file -- unlike DATA-06's ingestion-only limiter
+  (only touched by tests that literally call the upload endpoint), so its
+  in-memory state needs a reset between EVERY test in this whole suite,
+  not just an opt-in reset in the one test file that targets it directly.
+  See _reset_api_rate_limit_state below.
 """
 import os
 import sys
@@ -187,6 +195,35 @@ def make_auth_headers(isolated_db):
 def auth_headers(make_auth_headers):
     """Real JWT for tenant CLI-001, role=owner, minted via the real account-creation path."""
     return make_auth_headers("CLI-001")
+
+
+@pytest.fixture(autouse=True)
+def _reset_api_rate_limit_state():
+    """
+    API-03: reset backend/rate_limit.py's per-tenant-burst/per-IP-burst/
+    per-tenant-daily-quota in-memory state before AND after every test in
+    this whole suite. Without this, calls made by one test accumulate
+    against the same in-process dicts used by every other test's calls --
+    starlette.testclient.TestClient's default fake client address
+    ("testclient", 50000) means every unauthenticated request across the
+    ENTIRE pytest run shares one IP bucket, and every test using the
+    default auth_headers fixture shares one tenant (CLI-001) bucket. Left
+    unreset, a long run would eventually trip a real 429 in a test that
+    has nothing to do with rate limiting -- confirmed exactly this way
+    the first time this fixture was written (before it existed): 14
+    unrelated failures in test_mfa.py/test_refresh_tokens.py, each a
+    surprise 429 instead of the status code the test actually meant to
+    assert on, purely from unauthenticated signup/login calls made by
+    earlier tests in the same process eating into the shared IP bucket.
+    autouse=True + pytest's default function scope means this runs before
+    and after literally every test, whether or not that test even uses
+    the `client`/`app` fixtures.
+    """
+    from backend import rate_limit
+
+    rate_limit.reset_all_rate_limit_state_for_tests()
+    yield
+    rate_limit.reset_all_rate_limit_state_for_tests()
 
 
 def make_ledger_csv(tmp_path, rows, filename="ledger.csv", header="date,category,amount,description"):
