@@ -360,12 +360,13 @@ def test_route_inventory_matches_last_audit():
     -- don't just bump the numbers to whatever makes it pass without
     checking a route didn't silently lose its auth dependency.
     """
-    assert len(_ALL_ROUTE_KEYS) == 64, (
-        f"Expected 64 total (method, path) APIRoute-registered business routes (matches API-01's "
-        f"documented inventory as of 3 Sep 2026 -- the framework's own /docs, /redoc, /openapi.json "
-        f"and /docs/oauth2-redirect pages are plain Starlette Route objects, not APIRoute, and are "
-        f"deliberately NOT counted here), found {len(_ALL_ROUTE_KEYS)}. A route was added or removed "
-        f"-- see this test's own docstring before changing this number."
+    assert len(_ALL_ROUTE_KEYS) == 67, (
+        f"Expected 67 total (method, path) APIRoute-registered business routes (64 as of API-01's "
+        f"3 Sep 2026 audit, +3 from TEN-04's GET/POST/DELETE /api/v1/settings/team-quota -- the "
+        f"framework's own /docs, /redoc, /openapi.json and /docs/oauth2-redirect pages are plain "
+        f"Starlette Route objects, not APIRoute, and are deliberately NOT counted here), found "
+        f"{len(_ALL_ROUTE_KEYS)}. A route was added or removed -- see this test's own docstring "
+        f"before changing this number."
     )
     # PUBLIC_ROUTES intentionally lists 9 entries: the 5 real APIRoute business
     # endpoints meant to be reachable with no token (signup/login/refresh/
@@ -374,11 +375,13 @@ def test_route_inventory_matches_last_audit():
     # as real APIRoutes -- only the 5 actually intersect _ALL_ROUTE_KEYS today.
     assert len(PUBLIC_ROUTES) == 9, "PUBLIC_ROUTES itself changed size -- update this alongside the audit."
     assert len([k for k in PUBLIC_ROUTES if k in _ALL_ROUTE_KEYS]) == 5
-    assert len(_PROTECTED_ROUTE_KEYS) == 59, (
-        f"Expected 59 protected business routes (64 total - 5 genuinely public), found "
+    assert len(_PROTECTED_ROUTE_KEYS) == 62, (
+        f"Expected 62 protected business routes (67 total - 5 genuinely public), found "
         f"{len(_PROTECTED_ROUTE_KEYS)}."
     )
-    assert len(_ROLE_GATED_ROUTES) == 23, (
-        f"Expected 23 require_role()/require_role_allow_suspended()-gated routes, found "
+    assert len(_ROLE_GATED_ROUTES) == 25, (
+        f"Expected 25 require_role()/require_role_allow_suspended()-gated routes (23 as of the last "
+        f"audit, +2 from TEN-04's POST/DELETE /api/v1/settings/team-quota -- its GET is "
+        f"verify_jwt_and_get_user-gated, same as GET /api/v1/team/users, not role-gated), found "
         f"{len(_ROLE_GATED_ROUTES)}."
     )

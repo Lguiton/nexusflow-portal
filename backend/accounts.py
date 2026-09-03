@@ -382,6 +382,15 @@ class TenantDeleteRequest(BaseModel):
     confirm_company_name: str = Field(..., min_length=1, max_length=200)
 
 
+class TeamQuotaRequest(BaseModel):
+    # TEN-04: max_users >= 1 -- a tenant always has at least its owner, so
+    # a quota of 0 could never be satisfied and would just be a confusing
+    # way to spell "suspend this tenant" (TEN-02's /api/v1/tenant/suspend
+    # already exists and says what it means). Same gt=0 shape as
+    # BudgetCapRequest.monthly_cap_usd in main.py.
+    max_users: int = Field(..., gt=0)
+
+
 async def _lifecycle_fields(client_id: str) -> dict:
     """
     Shared by signup/login/me below so every auth response carries the
@@ -927,6 +936,25 @@ async def invite_teammate(
     req: InviteRequest,
     user: AuthenticatedUser = Depends(require_role("owner", "admin")),
 ):
+    # TEN-04: real team-size quota gate, checked BEFORE the new user is
+    # created (create_invited_user itself only enforces data-integrity
+    # rules that don't depend on who's asking or how many teammates
+    # already exist -- see its own docstring). No quota set (the default
+    # for every tenant) -> always allowed, identical to today's
+    # unrestricted behavior.
+    quota = await db_manager.check_user_quota_gate(user.client_id)
+    if not quota["allowed"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Your team is at its quota of {quota['max_users']} user"
+                f"{'s' if quota['max_users'] != 1 else ''} "
+                f"({quota['current_users']} today). Raise the quota at "
+                f"/api/v1/settings/team-quota or remove a teammate before "
+                f"inviting another."
+            ),
+        )
+
     temp_password = _generate_temp_password()
     pw_hash = hash_password(temp_password)
     try:
@@ -974,3 +1002,36 @@ async def remove_teammate(
     if not removed:
         raise HTTPException(status_code=404, detail="No matching teammate found on your tenant.")
     return {"user_id": target_user_id, "removed": True}
+
+
+@router.get("/api/v1/settings/team-quota", tags=["Tenant & Team"])
+async def get_team_quota(user: AuthenticatedUser = Depends(verify_jwt_and_get_user)):
+    """
+    TEN-04: real quota status -- any authenticated teammate (any role) can
+    check it, same "not sensitive on its own" call as list_team above.
+    Mirrors main.py's GET /api/v1/settings/budget shape.
+    """
+    return await db_manager.check_user_quota_gate(user.client_id)
+
+
+@router.post("/api/v1/settings/team-quota", tags=["Tenant & Team"])
+async def set_team_quota(
+    req: TeamQuotaRequest,
+    user: AuthenticatedUser = Depends(require_role("owner", "admin")),
+):
+    """
+    TEN-04: tenant-self-service quota -- no billing/tier concept exists
+    yet to drive this instead (see db_manager's ALTER-TABLE comment on
+    max_users), so an owner/admin sets their own team's ceiling directly.
+    Mirrors main.py's POST /api/v1/settings/budget shape.
+    """
+    await db_manager.set_tenant_user_quota(user.client_id, req.max_users)
+    return await db_manager.check_user_quota_gate(user.client_id)
+
+
+@router.delete("/api/v1/settings/team-quota", tags=["Tenant & Team"])
+async def delete_team_quota(user: AuthenticatedUser = Depends(require_role("owner", "admin"))):
+    """Clears the quota back to unrestricted -- mirrors main.py's DELETE
+    /api/v1/settings/budget shape."""
+    await db_manager.set_tenant_user_quota(user.client_id, None)
+    return await db_manager.check_user_quota_gate(user.client_id)

@@ -326,6 +326,25 @@ async def init_db():
                     except Exception as e:
                         if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
                             raise
+                # TEN-04: per-tenant user/team-size quota. NULL (the default
+                # for every existing and new tenant) means "no quota set" --
+                # unrestricted, identical to today's behavior -- never a
+                # silent 0/blocked-by-default state. Same idempotent
+                # migration shape and same NULL-means-unrestricted contract
+                # as monthly_ai_budget_usd (FINOPS-01) above. Deliberately
+                # only "users" of TEN-04's four sub-quotas (users, storage,
+                # rows, requests) -- storage/rows need a billing/tier
+                # concept that doesn't exist yet (the ledger ingestion model
+                # is delete-and-replace per upload, not additive, so a
+                # "storage" or "row" cap can't honestly mean anything until
+                # that concept exists); requests already has API-03's real
+                # per-tenant daily quota (see rate_limit.py).
+                if "max_users" not in tenant_cols:
+                    try:
+                        conn.execute("ALTER TABLE tenants ADD COLUMN max_users INTEGER")
+                    except Exception as e:
+                        if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
+                            raise
                 conn.execute("CREATE SEQUENCE IF NOT EXISTS user_id_seq")
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS users (
@@ -1820,6 +1839,93 @@ async def check_budget_gate(client_id: str) -> dict:
     pct_used = round((usage["usage_usd"] / cap_usd) * 100, 1) if cap_usd > 0 else 100.0
     allowed = usage["usage_usd"] < cap_usd
     return {"allowed": allowed, "cap_usd": cap_usd, **usage, "pct_used": pct_used}
+
+
+# ==============================================================================
+# TEN-04 (users sub-quota): real per-tenant team-size cap. Same shape as
+# FINOPS-01's budget cap immediately above -- an optional per-tenant limit
+# plus a gate check that reports whether the NEXT add (an invite, here)
+# should be allowed. No billing/tier concept exists yet (see the ALTER-
+# TABLE comment on max_users above), so this is deliberately a tenant-
+# self-service limit (an owner/admin can set their own team's ceiling, or
+# leave it unset for today's unrestricted behavior) rather than a
+# plan-tier-driven one -- honest about what's real today, upgradeable to
+# tier-driven later without changing this gate's shape.
+# ==============================================================================
+
+async def set_tenant_user_quota(client_id: str, max_users: Optional[int]) -> None:
+    """max_users=None clears the quota (back to unrestricted) -- mirrors
+    set_tenant_budget_cap's None-clears convention."""
+    lock = get_db_lock()
+
+    def _update():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute(
+                    "UPDATE tenants SET max_users = ? WHERE client_id = ?",
+                    [max_users, client_id],
+                )
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_update)
+
+
+async def get_tenant_user_quota(client_id: str) -> Optional[int]:
+    lock = get_db_lock()
+
+    def _get():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT max_users FROM tenants WHERE client_id = ?",
+                    [client_id],
+                ).fetchone()
+                return row[0] if row else None
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def count_users_for_tenant(client_id: str) -> int:
+    """Real COUNT(*) over the users table for this tenant -- not a cached
+    or estimated figure, so the gate below is always checking the actual
+    current headcount, including any teammate added or removed since the
+    last check."""
+    lock = get_db_lock()
+
+    def _count():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM users WHERE client_id = ?",
+                    [client_id],
+                ).fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_count)
+
+
+async def check_user_quota_gate(client_id: str) -> dict:
+    """
+    The real gate check, called by accounts.invite_teammate BEFORE the new
+    user is created. No quota set (the default for every tenant) ->
+    always allowed=True, identical to today's unrestricted behavior. A
+    quota set and the tenant's real current headcount already AT it ->
+    allowed False (one more invite would exceed it), with the actual
+    numbers so the caller can return an honest, specific 409 rather than a
+    generic block.
+    """
+    max_users = await get_tenant_user_quota(client_id)
+    current_users = await count_users_for_tenant(client_id)
+    if max_users is None:
+        return {"allowed": True, "max_users": None, "current_users": current_users, "pct_used": None}
+    pct_used = round((current_users / max_users) * 100, 1) if max_users > 0 else 100.0
+    allowed = current_users < max_users
+    return {"allowed": allowed, "max_users": max_users, "current_users": current_users, "pct_used": pct_used}
 
 
 # ==============================================================================
