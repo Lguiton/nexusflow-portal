@@ -419,12 +419,36 @@ workflow.add_edge("report_generator", END)
 workflow.add_edge("bi_visualization_architect", END)
 workflow.add_edge("external_telemetry_scout", END)
 app_graph = workflow.compile()
-def _summarize_result(result: Any) -> str:
+def _summarize_result(result: Any, active_agent: Optional[str] = None, had_error: bool = False) -> str:
     if isinstance(result, dict) and result:
         parts = [f"{k}: {v}" for k, v in result.items()]
         return "; ".join(parts)
     if result:
         return str(result)
+    # QA-05: previously this fallback was fully generic no matter what went
+    # wrong -- when an execute_* node's agent call raised, state["errors"]
+    # correctly captured the real exception text (see each execute_* node's
+    # own except block below), but route_query()'s returned dict never
+    # included state["errors"] at all, so the caller only ever saw this
+    # exact same string regardless of which of the 8 routed agents failed
+    # or why. Confirmed live against frontend/components/CognitiveSearchBar.
+    # tsx: it surfaces synthesized_insight verbatim as the user-facing error
+    # message, so this was the ENTIRE diagnostic value a real user or a real
+    # on-call engineer reading a support ticket ever got.
+    #
+    # Deliberately still does not leak raw exception text to the client --
+    # same posture as ops_shield's own generic, non-leaking error responses
+    # (an internal exception message can contain stack-trace-adjacent detail,
+    # file paths, or query fragments that shouldn't reach an end user over an
+    # API response). What changes here is naming the specific agent that
+    # failed, which is real, useful, non-sensitive triage information on its
+    # own -- "the bi_engineer agent failed" is actionable; a fully generic
+    # message never was.
+    if had_error and active_agent:
+        return (
+            f"The '{active_agent}' agent could not complete this request due to an internal error. "
+            f"Please try again or rephrase your question."
+        )
     return "No result was produced by the routed agent."
 # AI-07: previously route_query() didn't return a confidence_score field AT
 # ALL, despite the build list's own note describing one as "currently a
@@ -507,7 +531,13 @@ def route_query(
     final_state = app_graph.invoke(initial_state)
     active_agent = final_state.get("active_agent")
     agent_result = final_state.get("results", {}).get(active_agent)
-    synthesized_insight = _summarize_result(agent_result)
+    # QA-05: state["errors"] is populated by whichever execute_* node's own
+    # except block ran (see e.g. execute_virtual_cfo above) -- non-empty
+    # here means the routed agent genuinely raised, not just returned an
+    # empty/no-data result. Passed through so _summarize_result can name the
+    # failing agent instead of returning a fully generic message either way.
+    had_error = bool(final_state.get("errors"))
+    synthesized_insight = _summarize_result(agent_result, active_agent, had_error)
     # Persist this exchange for the NEXT turn in this session. Logged after
     # the graph completes, and logs whatever actually happened (including an
     # ERROR-status turn) -- never fabricates a success turn that didn't occur.

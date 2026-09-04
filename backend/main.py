@@ -650,6 +650,31 @@ async def restore_dataset_version_endpoint(
         raise HTTPException(status_code=502, detail="Dataset version restore failed. Please try again.")
 
 
+# QA-05: previously no request-level timeout backstop existed anywhere in
+# this endpoint's path -- confirmed by grep, zero matches for
+# asyncio.wait_for/timeout= in this file or agents/orchestrator.py. Only
+# the OpenAI client itself (agents/*.py's own AI_REQUEST_TIMEOUT_SECONDS=
+# 30, see AI-03) bounds an individual LLM call; nothing bounded the whole
+# request if that assumption were ever violated -- e.g. a hang inside
+# ops_shield's own DB/keyword logic, before any LLM call is even reached.
+# SEARCH_REQUEST_TIMEOUT_SECONDS is deliberately larger than any single
+# agent's own AI_REQUEST_TIMEOUT_SECONDS (30s) to leave real room for
+# ops_shield's own threat check plus the routed agent's own DB work
+# around its LLM call, while still giving the calling client an honest,
+# bounded response instead of an indefinite hang.
+#
+# Disclosed limitation, not silently assumed away: asyncio.wait_for()
+# cancels the AWAITING coroutine, not the underlying asyncio.to_thread()
+# worker thread itself -- Python's thread pool has no forced-cancellation
+# mechanism. A genuinely stuck worker thread keeps running in the
+# background after this endpoint has already returned its 504; it does
+# not free whatever resource it was stuck on. This backstop's real
+# guarantee is narrower than "kills the hang": it guarantees the CALLING
+# CLIENT gets a bounded, honest response instead of waiting forever, not
+# that server-side resources are reclaimed.
+SEARCH_REQUEST_TIMEOUT_SECONDS = 60.0
+
+
 @app.post("/api/search", tags=["Search"])
 async def secure_cognitive_search(
     req: SearchRequest,
@@ -658,7 +683,13 @@ async def secure_cognitive_search(
     client_id = user.client_id
     try:
         from backend.agents.ops_shield import analyze_threat
-        threat_result = await asyncio.to_thread(analyze_threat, client_id, req.query)
+        threat_result = await asyncio.wait_for(
+            asyncio.to_thread(analyze_threat, client_id, req.query),
+            timeout=SEARCH_REQUEST_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"Ops Shield threat check timed out after {SEARCH_REQUEST_TIMEOUT_SECONDS}s for tenant '{client_id}'.")
+        raise HTTPException(status_code=504, detail="Security check timed out. Please try again.")
     except Exception as e:
         logger.error(f"Ops Shield invocation error: {e}")
         raise HTTPException(status_code=503, detail="Security firewall unavailable. Please try again.")
@@ -667,10 +698,16 @@ async def secure_cognitive_search(
         raise HTTPException(status_code=403, detail="Request blocked by security policy.")
     try:
         from backend.agents.orchestrator import route_query
-        result = await asyncio.to_thread(
-            route_query, req.query, client_id, req.session_id, req.sample_payload, user.user_id
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                route_query, req.query, client_id, req.session_id, req.sample_payload, user.user_id
+            ),
+            timeout=SEARCH_REQUEST_TIMEOUT_SECONDS,
         )
         return result
+    except asyncio.TimeoutError:
+        logger.error(f"Cognitive search routing timed out after {SEARCH_REQUEST_TIMEOUT_SECONDS}s for tenant '{client_id}'.")
+        raise HTTPException(status_code=504, detail="Search routing timed out. Please try again.")
     except Exception as e:
         logger.error(f"Cognitive search routing error: {e}")
         raise HTTPException(status_code=502, detail="Search routing failed. Please try again.")
