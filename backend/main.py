@@ -574,6 +574,82 @@ async def delete_ledger_endpoint(
     except Exception as e:
         logger.error(f"Ledger deletion error: {e}")
         raise HTTPException(status_code=502, detail="Ledger deletion failed. Please try again.")
+
+
+# DATA-09 (versioning half): explicit dataset versioning -- see
+# db_manager.py's own module-level comment above
+# _archive_current_ledger_version_locked for the full design and why this
+# is purely additive to `ledgers`' existing behavior. Every replace-in-
+# place upload (POST /api/finance/upload-ledger, already wired above via
+# ingest_csv_to_db) now archives what it's about to replace; these three
+# endpoints are the real surface to see and use that archive.
+@app.get("/api/v1/data/dataset-versions", tags=["Ledger & Ingestion"])
+async def get_dataset_versions_endpoint(
+    limit: int = 20,
+    offset: int = Query(0, ge=0, description="Rows to skip before the first returned row."),
+    client_id: str = Depends(verify_jwt_and_get_client_id),
+):
+    # Same access level as GET /api/v1/data/ingestion-history above --
+    # viewing this tenant's own version history is safe for any
+    # authenticated teammate; only restoring one (below) is owner/admin-gated.
+    try:
+        from backend.db_manager import get_dataset_versions, count_dataset_versions
+        rows = await get_dataset_versions(client_id, limit=limit, offset=offset)
+        total_count = await count_dataset_versions(client_id)
+        page = _paginated_envelope(rows, total_count, limit, offset)
+        page["versions"] = page.pop("items")
+        return {"client_id": client_id, **page}
+    except Exception as e:
+        logger.error(f"Dataset versions fetch error: {e}")
+        raise HTTPException(status_code=502, detail="Could not fetch dataset versions. Please try again.")
+
+
+@app.get("/api/v1/data/dataset-versions/{version_number}/rows", tags=["Ledger & Ingestion"])
+async def get_dataset_version_rows_endpoint(
+    version_number: int,
+    limit: int = 100,
+    offset: int = Query(0, ge=0, description="Rows to skip before the first returned row."),
+    client_id: str = Depends(verify_jwt_and_get_client_id),
+):
+    try:
+        from backend.db_manager import get_dataset_version_rows
+        rows = await get_dataset_version_rows(client_id, version_number, limit=limit, offset=offset)
+        return {"client_id": client_id, "version_number": version_number, "rows": rows, "count": len(rows)}
+    except Exception as e:
+        logger.error(f"Dataset version rows fetch error: {e}")
+        raise HTTPException(status_code=502, detail="Could not fetch this version's rows. Please try again.")
+
+
+@app.post("/api/v1/data/dataset-versions/{version_number}/restore", tags=["Ledger & Ingestion"])
+async def restore_dataset_version_endpoint(
+    version_number: int,
+    # Overwrites the tenant's entire current live ledger -- same
+    # owner/admin restriction as DELETE /api/v1/finance/ledger above, for
+    # the same reason (a destructive, whole-tenant-data operation).
+    # client_id comes ONLY from the verified JWT dependency -- never
+    # accepted as a request parameter -- so this can only ever restore
+    # into the caller's own tenant, never another tenant's.
+    user: AuthenticatedUser = Depends(require_role("owner", "admin")),
+):
+    client_id = user.client_id
+    try:
+        from backend.db_manager import restore_dataset_version
+        restored_count = await restore_dataset_version(client_id, version_number)
+        return {
+            "status": "SUCCESS",
+            "client_id": client_id,
+            "version_number": version_number,
+            "rows_restored": restored_count,
+            "message": f"Restored dataset version {version_number} ({restored_count} row(s)). "
+                       f"The data that was live before this restore was itself archived as a new version.",
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Dataset version restore error: {e}")
+        raise HTTPException(status_code=502, detail="Dataset version restore failed. Please try again.")
+
+
 @app.post("/api/search", tags=["Search"])
 async def secure_cognitive_search(
     req: SearchRequest,

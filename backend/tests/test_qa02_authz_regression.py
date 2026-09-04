@@ -137,6 +137,12 @@ _PATH_PARAM_FILL = {
     "key_id": "999999",
     "doc_id": "nonexistent-doc-id",
     "session_id": "999999",
+    # DATA-09 (versioning half): a syntactically-valid int so the route
+    # matches at all -- version 999999 almost certainly doesn't exist for
+    # QA02-ROLE-TENANT/QA02-ROLE-TENANT-OK, which is fine: this suite only
+    # checks the auth/role gate runs BEFORE business logic, not that the
+    # version lookup itself succeeds.
+    "version_number": "999999",
 }
 
 
@@ -365,14 +371,14 @@ def test_route_inventory_matches_last_audit():
     -- don't just bump the numbers to whatever makes it pass without
     checking a route didn't silently lose its auth dependency.
     """
-    assert len(_ALL_ROUTE_KEYS) == 69, (
-        f"Expected 69 total (method, path) APIRoute-registered business routes (64 as of API-01's "
-        f"3 Sep 2026 audit, +3 from TEN-04's GET/POST/DELETE /api/v1/settings/team-quota, +1 from "
-        f"SEC-02's GET /api/v1/security/events, +1 from OPS-05's GET /api/v1/status -- the "
-        f"framework's own /docs, /redoc, /openapi.json and /docs/oauth2-redirect pages are plain "
-        f"Starlette Route objects, not APIRoute, and are deliberately NOT counted here), found "
-        f"{len(_ALL_ROUTE_KEYS)}. A route was added or removed -- see this test's own docstring "
-        f"before changing this number."
+    assert len(_ALL_ROUTE_KEYS) == 72, (
+        f"Expected 72 total (method, path) APIRoute-registered business routes (69 as of OPS-05's "
+        f"3 Sep 2026 audit, +3 from DATA-09's GET /api/v1/data/dataset-versions, GET /api/v1/data/"
+        f"dataset-versions/{{version_number}}/rows, and POST /api/v1/data/dataset-versions/"
+        f"{{version_number}}/restore -- the framework's own /docs, /redoc, /openapi.json and "
+        f"/docs/oauth2-redirect pages are plain Starlette Route objects, not APIRoute, and are "
+        f"deliberately NOT counted here), found {len(_ALL_ROUTE_KEYS)}. A route was added or "
+        f"removed -- see this test's own docstring before changing this number."
     )
     # PUBLIC_ROUTES intentionally lists 10 entries: the 6 real APIRoute
     # business endpoints meant to be reachable with no token (signup/login/
@@ -382,14 +388,14 @@ def test_route_inventory_matches_last_audit():
     # intersect _ALL_ROUTE_KEYS today.
     assert len(PUBLIC_ROUTES) == 10, "PUBLIC_ROUTES itself changed size -- update this alongside the audit."
     assert len([k for k in PUBLIC_ROUTES if k in _ALL_ROUTE_KEYS]) == 6
-    assert len(_PROTECTED_ROUTE_KEYS) == 63, (
-        f"Expected 63 protected business routes (69 total - 6 genuinely public), found "
+    assert len(_PROTECTED_ROUTE_KEYS) == 66, (
+        f"Expected 66 protected business routes (72 total - 6 genuinely public), found "
         f"{len(_PROTECTED_ROUTE_KEYS)}."
     )
-    assert len(_ROLE_GATED_ROUTES) == 26, (
-        f"Expected 26 require_role()/require_role_allow_suspended()-gated routes (23 as of the last "
-        f"audit, +2 from TEN-04's POST/DELETE /api/v1/settings/team-quota (its GET is "
-        f"verify_jwt_and_get_user-gated, same as GET /api/v1/team/users, not role-gated), +1 from "
-        f"SEC-02's GET /api/v1/security/events (require_role('owner', 'admin'))), found "
-        f"{len(_ROLE_GATED_ROUTES)}."
+    assert len(_ROLE_GATED_ROUTES) == 27, (
+        f"Expected 27 require_role()/require_role_allow_suspended()-gated routes (26 as of the last "
+        f"audit, +1 from DATA-09's POST /api/v1/data/dataset-versions/{{version_number}}/restore "
+        f"(require_role('owner', 'admin')) -- the two new GET dataset-version routes are "
+        f"verify_jwt_and_get_client_id-gated, same as GET /api/v1/data/ingestion-history, not "
+        f"role-gated), found {len(_ROLE_GATED_ROUTES)}."
     )

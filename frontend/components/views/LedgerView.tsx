@@ -7,6 +7,7 @@ import CategorySuggestionsWidget from "../CategorySuggestionsWidget";
 import ExportActionBar from "../ExportActionBar";
 import TelemetryScoutCard from "../TelemetryScoutCard";
 import IngestionHistoryCard from "../IngestionHistoryCard";
+import DatasetVersionsCard from "../DatasetVersionsCard";
 import { useClientId } from "../ClientContext";
 
 interface LedgerViewProps {
@@ -78,6 +79,9 @@ export default function LedgerView({ refreshTrigger, onUploadSuccess, onApplied 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <IngestionHistoryCard refreshTrigger={refreshTrigger} onDataChanged={onUploadSuccess} />
         <TelemetryScoutCard />
+      </div>
+      <div className="grid grid-cols-1 gap-6">
+        <DatasetVersionsCard refreshTrigger={refreshTrigger} onDataChanged={onUploadSuccess} />
       </div>
     </div>
   );

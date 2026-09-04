@@ -2839,6 +2839,17 @@ async def ingest_csv_to_db(file_path: str, client_id: str, original_filename: st
             conn = duckdb.connect(DB_PATH)
             try:
                 conn.execute("BEGIN TRANSACTION")
+                # DATA-09 (dataset versioning half): archive whatever is
+                # about to be replaced -- see _archive_current_ledger_version_locked's
+                # own docstring for the full design. Purely additive: this
+                # INSERTs into two separate archive tables and returns before
+                # touching `ledgers` at all, so the DELETE+INSERT immediately
+                # below is byte-for-byte the same live-table behavior every
+                # existing reader of `ledgers` already depends on -- zero risk
+                # of a query anywhere in this codebase double-counting
+                # historical + current rows, because no reader was ever
+                # pointed at the archive tables.
+                _archive_current_ledger_version_locked(conn, client_id, replaced_by_filename=display_name, source="REPLACED")
                 conn.execute("DELETE FROM ledgers WHERE client_id = ?", [client_id])
                 conn.register("clean_df_view", clean_df)
                 try:
@@ -4044,6 +4055,18 @@ async def delete_tenant_ledger(client_id: str) -> int:
     ledger wipe, not the broader tenant lifecycle deletion described in
     TEN-03 (which would also need to cover telemetry/audit history and
     the tenant record itself, once one exists).
+
+    Also purges this tenant's archived dataset versions (dataset_versions
+    + ledger_version_archive, both added by DATA-09's later versioning
+    half). Deliberate, and load-bearing for what this function's own
+    caller (the frontend danger zone) promises the user: "Permanently
+    deletes every ledger row this tenant has uploaded." A past REPLACED
+    upload's rows are still ledger rows this tenant uploaded -- leaving
+    them sitting in the archive, silently restorable via
+    restore_dataset_version after a tenant believes they deleted
+    everything, would make that promise false. Confirmed by
+    test_delete_tenant_ledger_also_purges_archived_versions in
+    test_data09_dataset_versioning.py.
     """
     if not client_id:
         raise ValueError("client_id is required.")
@@ -4057,6 +4080,9 @@ async def delete_tenant_ledger(client_id: str) -> int:
                     "SELECT COUNT(*) FROM ledgers WHERE client_id = ?", [client_id]
                 ).fetchone()[0]
                 conn.execute("DELETE FROM ledgers WHERE client_id = ?", [client_id])
+                _ensure_versioning_tables(conn)
+                conn.execute("DELETE FROM ledger_version_archive WHERE client_id = ?", [client_id])
+                conn.execute("DELETE FROM dataset_versions WHERE client_id = ?", [client_id])
                 conn.execute("COMMIT")
                 return int(before or 0)
             except Exception as e:
@@ -4074,6 +4100,274 @@ async def delete_tenant_ledger(client_id: str) -> int:
         f"Tenant-requested deletion removed {deleted_count} ledger row(s)."
     )
     return deleted_count
+
+
+# ==============================================================================
+# DATA-09 (versioning half): explicit dataset versioning.
+#
+# Deliberately does NOT touch `ledgers`' own semantics or add a
+# version_number column to it -- every existing reader in this codebase
+# (every agent, every finance/analytics endpoint, every test) queries
+# `ledgers` filtered only by client_id, with no notion of "current version"
+# at all. Adding version-awareness to `ledgers` itself would mean finding
+# and updating every single one of those call sites to filter to the
+# current version, or every historical row would silently double-count
+# alongside the live data -- a platform-wide correctness risk, on a
+# FINANCIAL BI product, that a single contained pass has no business
+# taking on.
+#
+# Instead: two new, purely additive tables. `dataset_versions` is
+# per-tenant version metadata (one row per past replace-in-place event).
+# `ledger_version_archive` holds the actual archived rows, tagged by
+# version_id. Nothing in this codebase reads either table except the new
+# functions below and the new GET endpoints that expose them -- `ledgers`
+# and every one of its existing readers are completely unaware these
+# tables exist, so this is zero-risk to every already-shipped figure.
+#
+# The trigger for a new version is REPLACEMENT (a new upload superseding
+# the previous data via ingest_csv_to_db, wired in above) or an explicit
+# RESTORE (below) -- never DELETION. delete_tenant_ledger (above) is left
+# completely unchanged: a tenant asking to delete their data gets a real
+# delete, not a delete-that-secretly-keeps-a-copy. That is a deliberate,
+# disclosed scope boundary, not an oversight -- versioning covers
+# replacement, not the separate "give me a full erase" guarantee DATA-09's
+# deletion half already provides.
+# ==============================================================================
+
+def _ensure_versioning_tables(conn) -> None:
+    """Idempotent, same CREATE-IF-NOT-EXISTS pattern every other table in
+    this module uses. Called at the top of every function below (cheap,
+    no-op after the first real call) rather than only from init_db(), so
+    a database file that predates this feature still works the first time
+    any of these functions actually runs."""
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS dataset_version_id_seq")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dataset_versions (
+            version_id BIGINT,
+            client_id VARCHAR,
+            version_number INTEGER,
+            archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            row_count INTEGER,
+            replaced_by_filename VARCHAR,
+            source VARCHAR
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ledger_version_archive (
+            version_id BIGINT,
+            client_id VARCHAR,
+            row_id BIGINT,
+            date VARCHAR,
+            category VARCHAR,
+            amount DOUBLE,
+            description VARCHAR,
+            is_recurring BOOLEAN
+        )
+    """)
+
+
+def _archive_current_ledger_version_locked(conn, client_id: str, replaced_by_filename: str, source: str) -> Optional[int]:
+    """
+    Archives whatever `ledgers` currently holds for this tenant into a new
+    numbered version, BEFORE the caller deletes/replaces it. MUST be called
+    from inside a transaction the caller already opened (BEGIN TRANSACTION),
+    on the same `conn`, while already holding get_db_lock() -- this function
+    does neither itself, so it composes cleanly into both callers'
+    (ingest_csv_to_db, restore_dataset_version) existing transactions rather
+    than opening a second, separate one.
+
+    `source` is 'REPLACED' (a new upload is about to supersede this data) or
+    'RESTORE_SNAPSHOT' (a restore is about to overwrite this data -- see
+    restore_dataset_version's own docstring for why that path archives too).
+
+    Returns the new version_number, or None if there was nothing to archive
+    (a brand new tenant's first-ever upload) -- no phantom "version 1 of
+    nothing" row is ever created.
+    """
+    _ensure_versioning_tables(conn)
+    existing_count = conn.execute(
+        "SELECT COUNT(*) FROM ledgers WHERE client_id = ?", [client_id]
+    ).fetchone()[0]
+    if not existing_count:
+        return None
+    next_version_number = conn.execute(
+        "SELECT COALESCE(MAX(version_number), 0) + 1 FROM dataset_versions WHERE client_id = ?", [client_id]
+    ).fetchone()[0]
+    version_id = conn.execute("SELECT nextval('dataset_version_id_seq')").fetchone()[0]
+    conn.execute(
+        "INSERT INTO dataset_versions (version_id, client_id, version_number, row_count, replaced_by_filename, source) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [version_id, client_id, next_version_number, int(existing_count), replaced_by_filename, source],
+    )
+    conn.execute(
+        "INSERT INTO ledger_version_archive (version_id, client_id, row_id, date, category, amount, description, is_recurring) "
+        "SELECT ?, client_id, row_id, date, category, amount, description, is_recurring FROM ledgers WHERE client_id = ?",
+        [version_id, client_id],
+    )
+    return int(next_version_number)
+
+
+async def get_dataset_versions(client_id: str, limit: int = 20, offset: int = 0) -> list:
+    """Newest-first, paginated -- same shape/limits convention as
+    get_ingestion_history."""
+    if not client_id:
+        raise ValueError("client_id is required.")
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset or 0))
+    lock = get_db_lock()
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                _ensure_versioning_tables(conn)
+                rows = conn.execute("""
+                    SELECT version_number, archived_at, row_count, replaced_by_filename, source
+                    FROM dataset_versions
+                    WHERE client_id = ?
+                    ORDER BY version_number DESC
+                    LIMIT ? OFFSET ?
+                """, [client_id, limit, offset]).fetchall()
+                return [
+                    {
+                        "version_number": r[0],
+                        "archived_at": str(r[1]),
+                        "row_count": r[2],
+                        "replaced_by_filename": r[3],
+                        "source": r[4],
+                    }
+                    for r in rows
+                ]
+            except Exception as e:
+                logger.error(f"Failed to fetch dataset versions for tenant '{client_id}': {e}")
+                return []
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
+async def count_dataset_versions(client_id: str) -> int:
+    if not client_id:
+        return 0
+    lock = get_db_lock()
+    def _count():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                _ensure_versioning_tables(conn)
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM dataset_versions WHERE client_id = ?", [client_id]
+                ).fetchone()
+                return int(row[0]) if row else 0
+            except Exception as e:
+                logger.error(f"Failed to count dataset versions for tenant '{client_id}': {e}")
+                return 0
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_count)
+
+
+async def get_dataset_version_rows(client_id: str, version_number: int, limit: int = 100, offset: int = 0) -> list:
+    """Inspect a specific archived version's actual rows -- same shape as
+    LedgerRowExplorer's existing drill-down, just sourced from the archive
+    table for a past version instead of the live `ledgers` table."""
+    if not client_id:
+        raise ValueError("client_id is required.")
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset or 0))
+    lock = get_db_lock()
+    def _query():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                _ensure_versioning_tables(conn)
+                rows = conn.execute("""
+                    SELECT a.row_id, a.date, a.category, a.amount, a.description, a.is_recurring
+                    FROM ledger_version_archive a
+                    JOIN dataset_versions v ON v.version_id = a.version_id
+                    WHERE v.client_id = ? AND v.version_number = ? AND a.client_id = ?
+                    ORDER BY a.row_id
+                    LIMIT ? OFFSET ?
+                """, [client_id, version_number, client_id, limit, offset]).fetchall()
+                return [
+                    {
+                        "row_id": r[0], "date": r[1], "category": r[2],
+                        "amount": r[3], "description": r[4], "is_recurring": r[5],
+                    }
+                    for r in rows
+                ]
+            except Exception as e:
+                logger.error(f"Failed to fetch dataset version rows for tenant '{client_id}' version {version_number}: {e}")
+                return []
+            finally:
+                conn.close()
+    return await asyncio.to_thread(_query)
+
+
+async def restore_dataset_version(client_id: str, version_number: int) -> int:
+    """
+    DATA-09: explicit, real restore -- replaces `ledgers`' current content
+    for this tenant with a past archived version's rows, verbatim (same
+    row_id values, so this is a genuine restoration, not a re-import that
+    mints new identifiers).
+
+    Never loses data: whatever is CURRENTLY live is itself archived as a
+    new version (source='RESTORE_SNAPSHOT') before being overwritten --
+    same _archive_current_ledger_version_locked helper ingest_csv_to_db
+    uses, composed into this function's own transaction. Restoring to an
+    old version is therefore always reversible; nothing is ever silently
+    lost by restoring.
+
+    Raises ValueError if version_number doesn't exist for this tenant --
+    never silently no-ops.
+    """
+    if not client_id:
+        raise ValueError("client_id is required.")
+    lock = get_db_lock()
+    def _restore():
+        with lock:
+            conn = duckdb.connect(DB_PATH)
+            try:
+                conn.execute("BEGIN TRANSACTION")
+                _ensure_versioning_tables(conn)
+                target = conn.execute(
+                    "SELECT version_id, row_count FROM dataset_versions WHERE client_id = ? AND version_number = ?",
+                    [client_id, version_number],
+                ).fetchone()
+                if not target:
+                    raise ValueError(f"Dataset version {version_number} does not exist for this tenant.")
+                target_version_id, target_row_count = target
+
+                _archive_current_ledger_version_locked(
+                    conn, client_id,
+                    replaced_by_filename=f"(restored to version {version_number})",
+                    source="RESTORE_SNAPSHOT",
+                )
+                conn.execute("DELETE FROM ledgers WHERE client_id = ?", [client_id])
+                conn.execute(
+                    "INSERT INTO ledgers (row_id, client_id, date, category, amount, description, is_recurring) "
+                    "SELECT row_id, client_id, date, category, amount, description, is_recurring "
+                    "FROM ledger_version_archive WHERE version_id = ? AND client_id = ?",
+                    [target_version_id, client_id],
+                )
+                conn.execute("COMMIT")
+                return int(target_row_count or 0)
+            except Exception as e:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass  # nosec B110 -- best-effort rollback; nothing more to do if this also fails
+                if not isinstance(e, ValueError):
+                    logger.error(f"Failed to restore dataset version {version_number} for tenant '{client_id}': {e}")
+                raise
+            finally:
+                conn.close()
+    restored_count = await asyncio.to_thread(_restore)
+    await log_ingestion_attempt(
+        client_id, f"(restore to version {version_number})", "", "SUCCESS", restored_count, 0,
+        f"Restored dataset version {version_number} ({restored_count} row(s)). "
+        f"The data that was live before this restore was itself archived as a new version."
+    )
+    return restored_count
 
 
 # ==============================================================================
